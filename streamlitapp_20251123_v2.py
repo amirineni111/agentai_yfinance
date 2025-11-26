@@ -21,8 +21,8 @@ def get_connection_pool():
         'DATABASE=stockdata_db;'
         'Trusted_Connection=yes;'
         'MARS_Connection=yes;'  # Enable Multiple Active Result Sets
-        'Connection Timeout=600;'  # 10 minutes for large queries
-        'Command Timeout=600;'  # 10 minutes for large queries
+        'Connection Timeout=900;'  # 15 minutes for large queries
+        'Command Timeout=900;'  # 15 minutes for large queries
         'MultipleActiveResultSets=true;'  # Additional MARS setting
         'Pooling=true;'  # Enable connection pooling
     )
@@ -42,7 +42,7 @@ def get_connection():
     try:
         connection_string = get_connection_pool()
         conn = pyodbc.connect(connection_string)
-        conn.timeout = 600  # 10 minutes for large queries
+        conn.timeout = 900  # 15 minutes for large queries
         conn.autocommit = True  # Prevent transaction locks
         return conn
     except Exception as e:
@@ -2021,7 +2021,7 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
         sma_view = 'nasdaq_100_ema_sma_view'
         atr_view = 'nasdaq_100_atr'
     
-    limit_clause = f"TOP {limit}" if limit else "TOP 50"  # Default limit for performance
+    limit_clause = f"TOP {limit}" if limit else ""  # No default limit - load all stocks
     
     # Simplified query using only existing indicator views (no signal tables)
     query = f"""
@@ -2242,6 +2242,15 @@ def apply_flight_status_filters(df: pd.DataFrame) -> pd.DataFrame:
     
     st.sidebar.subheader("🔍 Flight Status Filters")
     
+    # Search Filter - NEW!
+    search_term = st.sidebar.text_input(
+        "🔎 Search Stock",
+        "",
+        placeholder="Enter ticker or company name...",
+        key="flight_search_filter",
+        help="Search by ticker symbol or company name"
+    )
+    
     # Signal Type Filter
     signal_types = ['All', 'Strong Buy (4-5)', 'Buy (1-3)', 'Hold (0)', 'Sell (-3 to -1)', 'Strong Sell (-5 to -4)']
     selected_signal = st.sidebar.selectbox("Signal Type", signal_types, key="flight_signal_filter")
@@ -2260,6 +2269,14 @@ def apply_flight_status_filters(df: pd.DataFrame) -> pd.DataFrame:
     
     # Apply filters
     filtered_df = df.copy()
+    
+    # Search filter - apply first
+    if search_term:
+        search_lower = search_term.lower()
+        filtered_df = filtered_df[
+            filtered_df['ticker'].str.lower().str.contains(search_lower, na=False) |
+            filtered_df['company'].str.lower().str.contains(search_lower, na=False)
+        ]
     
     # Signal filter
     if selected_signal != 'All':
@@ -3707,9 +3724,9 @@ def show_flight_status_page():
         help="Choose which market index to analyze"
     )
     
-    # Load data
+    # Load data - load ALL stocks (no limit)
     with st.spinner(f"🛩️ Loading flight status for {index_name}..."):
-        df = load_flight_status_data(index_name, limit=100)  # Limit for performance
+        df = load_flight_status_data(index_name, limit=None)  # Load all stocks
     
     if df.empty:
         st.error("❌ No data available. Please check your database connection and table structure.")
