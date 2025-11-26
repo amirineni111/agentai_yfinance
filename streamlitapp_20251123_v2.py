@@ -21,8 +21,8 @@ def get_connection_pool():
         'DATABASE=stockdata_db;'
         'Trusted_Connection=yes;'
         'MARS_Connection=yes;'  # Enable Multiple Active Result Sets
-        'Connection Timeout=30;'
-        'Command Timeout=30;'
+        'Connection Timeout=600;'  # 10 minutes for large queries
+        'Command Timeout=600;'  # 10 minutes for large queries
         'MultipleActiveResultSets=true;'  # Additional MARS setting
         'Pooling=true;'  # Enable connection pooling
     )
@@ -42,7 +42,7 @@ def get_connection():
     try:
         connection_string = get_connection_pool()
         conn = pyodbc.connect(connection_string)
-        conn.timeout = 30
+        conn.timeout = 600  # 10 minutes for large queries
         conn.autocommit = True  # Prevent transaction locks
         return conn
     except Exception as e:
@@ -1995,6 +1995,311 @@ def plot_signal_view(view_type: str, df: pd.DataFrame, label: str):
             st.info("Insufficient signal data for performance analysis.")
 
 # ----------------------------
+# FLIGHT STATUS DASHBOARD FUNCTIONS
+# ----------------------------
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
+    """
+    SIMPLIFIED: Flight status data using only core tables that exist
+    Fixed to work with your actual database structure
+    """
+    
+    # Map to your existing table and view names
+    if index_name == 'NSE 500':
+        base_table = 'nse_500_hist_data'
+        rsi_view = 'nse_500_RSI_calculation'
+        macd_view = 'nse_500_macd'
+        bb_view = 'nse_500_bollingerband'
+        sma_view = 'nse_500_ema_sma_view'
+        atr_view = 'nse_500_atr'
+    else:  # NASDAQ 100
+        base_table = 'nasdaq_100_hist_data'
+        rsi_view = 'nasdaq_100_RSI_calculation'
+        macd_view = 'nasdaq_100_macd'
+        bb_view = 'nasdaq_100_bollingerband' 
+        sma_view = 'nasdaq_100_ema_sma_view'
+        atr_view = 'nasdaq_100_atr'
+    
+    limit_clause = f"TOP {limit}" if limit else "TOP 50"  # Default limit for performance
+    
+    # Simplified query using only existing indicator views (no signal tables)
+    query = f"""
+    WITH 
+    -- Get latest price data for each stock
+    LatestPrices AS (
+        SELECT 
+            ticker,
+            company,
+            trading_date,
+            CAST(close_price AS FLOAT) AS close_price,
+            CAST(open_price AS FLOAT) AS open_price,
+            CAST(high_price AS FLOAT) AS high_price,
+            CAST(low_price AS FLOAT) AS low_price,
+            CAST(volume AS FLOAT) AS volume,
+            -- Calculate daily change
+            ROUND(((CAST(close_price AS FLOAT) - CAST(open_price AS FLOAT)) / CAST(open_price AS FLOAT)) * 100, 2) as daily_change_pct,
+            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+        FROM dbo.{base_table}
+    ),
+    
+    -- Latest RSI values
+    LatestRSI AS (
+        SELECT 
+            ticker,
+            RSI,
+            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+        FROM dbo.{rsi_view}
+    ),
+    
+    -- Latest MACD values  
+    LatestMACD AS (
+        SELECT 
+            ticker,
+            MACD,
+            Signal_Line,
+            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+        FROM dbo.{macd_view}
+    ),
+    
+    -- Latest Bollinger Bands
+    LatestBB AS (
+        SELECT 
+            ticker,
+            Upper_Band,
+            Lower_Band,
+            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+        FROM dbo.{bb_view}
+    ),
+    
+    -- Latest Moving Averages
+    LatestSMA AS (
+        SELECT 
+            ticker,
+            SMA_50,
+            SMA_200,
+            EMA_50,
+            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+        FROM dbo.{sma_view}
+    ),
+    
+    -- Latest ATR
+    LatestATR AS (
+        SELECT 
+            ticker, 
+            ATR_14,
+            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+        FROM dbo.{atr_view}
+    )
+    
+    -- Main query combining all data
+    SELECT {limit_clause}
+        p.ticker,
+        p.company,
+        p.trading_date as last_update,
+        p.close_price,
+        p.daily_change_pct,
+        p.volume,
+        
+        -- Technical Indicators
+        r.RSI,
+        m.MACD,
+        m.Signal_Line as MACD_Signal_Line,
+        bb.Upper_Band,
+        bb.Lower_Band,
+        sma.SMA_50,
+        sma.SMA_200,
+        sma.EMA_50,
+        atr.ATR_14,
+        
+        -- Calculated Trading Signals (derived from indicators)
+        CASE 
+            WHEN r.RSI < 30 THEN 'Buy'
+            WHEN r.RSI > 70 THEN 'Sell'
+            ELSE 'Hold'
+        END as rsi_signal,
+        
+        CASE 
+            WHEN m.MACD > m.Signal_Line THEN 'Buy'
+            WHEN m.MACD < m.Signal_Line THEN 'Sell'
+            ELSE 'Hold'
+        END as macd_signal,
+        
+        CASE 
+            WHEN p.close_price < bb.Lower_Band THEN 'Buy'
+            WHEN p.close_price > bb.Upper_Band THEN 'Sell'
+            ELSE 'Hold'
+        END as bb_signal,
+        
+        CASE 
+            WHEN sma.SMA_50 > sma.SMA_200 THEN 'Buy'
+            WHEN sma.SMA_50 < sma.SMA_200 THEN 'Sell'
+            ELSE 'Hold'
+        END as sma_signal,
+        
+        -- Calculated Analysis Fields
+        CASE 
+            WHEN r.RSI > 70 THEN 'Overbought'
+            WHEN r.RSI < 30 THEN 'Oversold'
+            ELSE 'Neutral'
+        END as rsi_status,
+        
+        CASE 
+            WHEN m.MACD > m.Signal_Line THEN 'Bullish'
+            WHEN m.MACD < m.Signal_Line THEN 'Bearish'
+            ELSE 'Neutral'
+        END as macd_trend,
+        
+        CASE 
+            WHEN p.close_price > sma.SMA_200 THEN 'Uptrend'
+            WHEN p.close_price < sma.SMA_200 THEN 'Downtrend' 
+            ELSE 'Sideways'
+        END as long_term_trend,
+        
+        -- Signal Strength Score (-4 to +4) based on indicators
+        (
+            -- RSI contribution 
+            CASE 
+                WHEN r.RSI < 30 THEN 1
+                WHEN r.RSI > 70 THEN -1 
+                ELSE 0 
+            END +
+            
+            -- MACD contribution
+            CASE 
+                WHEN m.MACD > m.Signal_Line THEN 1
+                WHEN m.MACD < m.Signal_Line THEN -1
+                ELSE 0 
+            END +
+            
+            -- BB contribution
+            CASE 
+                WHEN p.close_price < bb.Lower_Band THEN 1
+                WHEN p.close_price > bb.Upper_Band THEN -1
+                ELSE 0 
+            END +
+            
+            -- SMA contribution (Golden/Death Cross)
+            CASE 
+                WHEN sma.SMA_50 > sma.SMA_200 THEN 1
+                WHEN sma.SMA_50 < sma.SMA_200 THEN -1
+                ELSE 0 
+            END
+        ) as signal_score,
+        
+        -- Market Cap Category (based on volume as proxy)
+        CASE 
+            WHEN p.volume > 1000000 THEN 'Large Cap'
+            WHEN p.volume > 100000 THEN 'Mid Cap'
+            ELSE 'Small Cap'
+        END as market_cap_category
+        
+    FROM LatestPrices p
+    LEFT JOIN LatestRSI r ON p.ticker = r.ticker AND r.rn = 1
+    LEFT JOIN LatestMACD m ON p.ticker = m.ticker AND m.rn = 1
+    LEFT JOIN LatestBB bb ON p.ticker = bb.ticker AND bb.rn = 1
+    LEFT JOIN LatestSMA sma ON p.ticker = sma.ticker AND sma.rn = 1
+    LEFT JOIN LatestATR atr ON p.ticker = atr.ticker AND atr.rn = 1
+    WHERE p.rn = 1
+    ORDER BY p.ticker
+    """
+    
+    return execute_query_safe(query)
+
+def render_flight_status_summary_metrics(df: pd.DataFrame):
+    """Render the summary metrics at the top of flight status dashboard"""
+    if df.empty:
+        return
+        
+    total_stocks = len(df)
+    buy_signals = len(df[df['signal_score'] > 0])
+    sell_signals = len(df[df['signal_score'] < 0])
+    hold_signals = len(df[df['signal_score'] == 0])
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric("🛩️ Total Stocks", f"{total_stocks:,}")
+    
+    with col2:
+        st.metric("🟢 Buy Signals", f"{buy_signals}", f"{buy_signals/total_stocks:.1%}")
+    
+    with col3:
+        st.metric("🔴 Sell Signals", f"{sell_signals}", f"{sell_signals/total_stocks:.1%}")
+    
+    with col4:
+        st.metric("🟡 Hold/Neutral", f"{hold_signals}", f"{hold_signals/total_stocks:.1%}")
+    
+    with col5:
+        avg_score = df['signal_score'].mean()
+        st.metric("📊 Avg Signal Score", f"{avg_score:.1f}", 
+                 "🟢 Bullish" if avg_score > 0 else "🔴 Bearish" if avg_score < 0 else "🟡 Neutral")
+
+def apply_flight_status_filters(df: pd.DataFrame) -> pd.DataFrame:
+    """Render filter controls and return filtered dataframe for flight status"""
+    if df.empty:
+        return df
+    
+    st.sidebar.subheader("🔍 Flight Status Filters")
+    
+    # Signal Type Filter
+    signal_types = ['All', 'Strong Buy (4-5)', 'Buy (1-3)', 'Hold (0)', 'Sell (-3 to -1)', 'Strong Sell (-5 to -4)']
+    selected_signal = st.sidebar.selectbox("Signal Type", signal_types, key="flight_signal_filter")
+    
+    # RSI Status Filter
+    rsi_statuses = ['All'] + df['rsi_status'].dropna().unique().tolist()
+    selected_rsi = st.sidebar.selectbox("RSI Status", rsi_statuses, key="flight_rsi_filter")
+    
+    # Trend Filter
+    trends = ['All'] + df['long_term_trend'].dropna().unique().tolist()
+    selected_trend = st.sidebar.selectbox("Long-term Trend", trends, key="flight_trend_filter")
+    
+    # Market Cap Filter
+    market_caps = ['All'] + df['market_cap_category'].dropna().unique().tolist()
+    selected_cap = st.sidebar.selectbox("Market Cap", market_caps, key="flight_cap_filter")
+    
+    # Apply filters
+    filtered_df = df.copy()
+    
+    # Signal filter
+    if selected_signal != 'All':
+        if selected_signal == 'Strong Buy (4-5)':
+            filtered_df = filtered_df[filtered_df['signal_score'] >= 4]
+        elif selected_signal == 'Buy (1-3)':
+            filtered_df = filtered_df[(filtered_df['signal_score'] >= 1) & (filtered_df['signal_score'] <= 3)]
+        elif selected_signal == 'Hold (0)':
+            filtered_df = filtered_df[filtered_df['signal_score'] == 0]
+        elif selected_signal == 'Sell (-3 to -1)':
+            filtered_df = filtered_df[(filtered_df['signal_score'] <= -1) & (filtered_df['signal_score'] >= -3)]
+        elif selected_signal == 'Strong Sell (-5 to -4)':
+            filtered_df = filtered_df[filtered_df['signal_score'] <= -4]
+    
+    # Other filters
+    if selected_rsi != 'All':
+        filtered_df = filtered_df[filtered_df['rsi_status'] == selected_rsi]
+    
+    if selected_trend != 'All':
+        filtered_df = filtered_df[filtered_df['long_term_trend'] == selected_trend]
+    
+    if selected_cap != 'All':
+        filtered_df = filtered_df[filtered_df['market_cap_category'] == selected_cap]
+    
+    return filtered_df
+
+def get_flight_status_emoji(score):
+    """Get emoji for flight status"""
+    if score >= 4:
+        return '✈️🟢'  # Ready for takeoff
+    elif score >= 1:
+        return '🟢'     # Boarding
+    elif score == 0:
+        return '🟡'     # On schedule
+    elif score >= -3:
+        return '🟠'     # Delayed
+    else:
+        return '🔴'     # Cancelled
+
+# ----------------------------
 # MAIN APP
 # ----------------------------
 st.set_page_config(
@@ -2025,7 +2330,7 @@ st.sidebar.header("📊 Dashboard Controls")
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📈 Technical Analysis", "🤖 AI Price Predictions"],
+    ["🏠 Home & Filters", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard"],
     index=0,
     key="page_selector"
 )
@@ -2600,14 +2905,85 @@ This comprehensive technical analysis combines **professional indicators**, **tr
 
 
 def show_ml_prediction_page():
-    """Show the ML-based price prediction page"""
+    """Show the ML-based price prediction page with enhanced models"""
     import numpy as np
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.linear_model import LinearRegression
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import mean_absolute_error, mean_squared_error
+    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+    from sklearn.linear_model import LinearRegression, LogisticRegression
+    from sklearn.preprocessing import StandardScaler, MinMaxScaler
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, classification_report, confusion_matrix
+    from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
     import warnings
     warnings.filterwarnings('ignore')
+    
+    # Advanced ML models availability check
+    ADVANCED_MODELS_AVAILABLE = {}
+    
+    try:
+        import xgboost as xgb
+        ADVANCED_MODELS_AVAILABLE['XGBoost'] = True
+    except ImportError:
+        ADVANCED_MODELS_AVAILABLE['XGBoost'] = False
+    
+    try:
+        import lightgbm as lgb
+        ADVANCED_MODELS_AVAILABLE['LightGBM'] = True
+    except ImportError:
+        ADVANCED_MODELS_AVAILABLE['LightGBM'] = False
+    
+    try:
+        from prophet import Prophet
+        ADVANCED_MODELS_AVAILABLE['Prophet'] = True
+    except ImportError:
+        ADVANCED_MODELS_AVAILABLE['Prophet'] = False
+    
+    try:
+        from tensorflow.keras.models import Sequential
+        from tensorflow.keras.layers import LSTM, Dense, Dropout
+        from tensorflow.keras.optimizers import Adam
+        ADVANCED_MODELS_AVAILABLE['LSTM'] = True
+    except ImportError:
+        ADVANCED_MODELS_AVAILABLE['LSTM'] = False
+    
+    try:
+        from statsmodels.tsa.arima.model import ARIMA
+        ADVANCED_MODELS_AVAILABLE['ARIMA'] = True
+    except ImportError:
+        ADVANCED_MODELS_AVAILABLE['ARIMA'] = False
+    
+    # Advanced ML models availability check
+    ADVANCED_MODELS_AVAILABLE = {}
+    
+    try:
+        import xgboost as xgb
+        ADVANCED_MODELS_AVAILABLE['XGBoost'] = True
+    except ImportError:
+        ADVANCED_MODELS_AVAILABLE['XGBoost'] = False
+    
+    try:
+        import lightgbm as lgb
+        ADVANCED_MODELS_AVAILABLE['LightGBM'] = True
+    except ImportError:
+        ADVANCED_MODELS_AVAILABLE['LightGBM'] = False
+    
+    try:
+        from prophet import Prophet
+        ADVANCED_MODELS_AVAILABLE['Prophet'] = True
+    except ImportError:
+        ADVANCED_MODELS_AVAILABLE['Prophet'] = False
+    
+    try:
+        from tensorflow.keras.models import Sequential
+        from tensorflow.keras.layers import LSTM, Dense, Dropout
+        from tensorflow.keras.optimizers import Adam
+        ADVANCED_MODELS_AVAILABLE['LSTM'] = True
+    except ImportError:
+        ADVANCED_MODELS_AVAILABLE['LSTM'] = False
+    
+    try:
+        from statsmodels.tsa.arima.model import ARIMA
+        ADVANCED_MODELS_AVAILABLE['ARIMA'] = True
+    except ImportError:
+        ADVANCED_MODELS_AVAILABLE['ARIMA'] = False
     
     # Check if we have data from home page
     if 'selected_ticker' not in st.session_state or st.session_state.selected_ticker is None:
@@ -2622,12 +2998,21 @@ def show_ml_prediction_page():
     st.markdown(f"""
     # 🤖 AI Price Prediction & Forecasting
     
-    ### Advanced machine learning models to predict future price movements
+    ### Advanced machine learning models to predict future price movements for smart trading decisions
     
     **Market:** {index_option} | **Stock:** {selected_ticker}
     
     ---
     """)
+    
+    # Display available advanced models
+    st.sidebar.markdown("### 🔬 Advanced Models Status")
+    for model, available in ADVANCED_MODELS_AVAILABLE.items():
+        status = "✅" if available else "❌"
+        st.sidebar.text(f"{status} {model}")
+    
+    if not any(ADVANCED_MODELS_AVAILABLE.values()):
+        st.sidebar.warning("Install advanced packages: pip install xgboost lightgbm prophet tensorflow statsmodels")
     
     # Load and prepare data for ML
     with st.spinner("Loading data for ML analysis..."):
@@ -2652,30 +3037,64 @@ def show_ml_prediction_page():
             ml_df = ml_df.merge(macd_df[['trading_date', 'MACD', 'Signal_Line']], on='trading_date', how='left')
         if not atr_df.empty:
             ml_df = ml_df.merge(atr_df[['trading_date', 'ATR_14']], on='trading_date', how='left')
+      # ML Configuration
+    st.markdown("## ⚙️ Enhanced ML Model Configuration")
     
-    # ML Configuration
-    st.markdown("## ⚙️ ML Model Configuration")
-    
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         prediction_days = st.selectbox("Prediction Horizon", [1, 3, 5, 7, 14, 30], index=2, key="pred_days")
     
     with col2:
-        model_type = st.selectbox("ML Model", ["Random Forest", "Linear Regression", "Ensemble"], key="model_type")
+        # Build model list based on availability
+        base_models = ["Random Forest", "Linear Regression", "Gradient Boosting"]
+        available_models = base_models.copy()
+        
+        if ADVANCED_MODELS_AVAILABLE.get('XGBoost', False):
+            available_models.append("XGBoost")
+        if ADVANCED_MODELS_AVAILABLE.get('LightGBM', False):
+            available_models.append("LightGBM")
+        if ADVANCED_MODELS_AVAILABLE.get('LSTM', False):
+            available_models.append("LSTM Neural Network")
+        if ADVANCED_MODELS_AVAILABLE.get('Prophet', False):
+            available_models.append("Prophet (Time Series)")
+        
+        available_models.extend(["Ensemble (All Available)", "Classification (Buy/Sell/Hold)"])
+        
+        model_type = st.selectbox("ML Model", available_models, index=0, key="model_type")
     
     with col3:
         feature_set = st.selectbox("Feature Set", ["Technical Only", "Volume + Technical", "All Features"], index=2, key="features")
     
-    # Prepare features
+    with col4:
+        # Advanced options
+        use_time_series_cv = st.checkbox("Time Series CV", value=True, help="Use time series cross-validation")
+        optimize_hyperparams = st.checkbox("Hyperparameter Optimization", value=False, help="Optimize model parameters (slower)")
+    
+    # Show feature engineering options
+    with st.expander("🔧 Advanced Feature Engineering Options", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Additional Technical Features:**")
+            add_lagged_features = st.checkbox("Lagged Price Features", value=True, help="Add previous N-day prices")
+            add_volatility_regime = st.checkbox("Volatility Regime Classification", value=True, help="High/Medium/Low volatility periods")
+            add_trend_strength = st.checkbox("Trend Strength Indicator", value=True, help="Measure of trend strength")
+        
+        with col2:
+            st.markdown("**Market Features:**")
+            add_market_cap_features = st.checkbox("Market Cap Relative Features", value=False, help="Relative to market performance")
+            add_sector_features = st.checkbox("Sector Momentum", value=False, help="Sector-based features")
+            add_seasonality = st.checkbox("Seasonal Features", value=True, help="Day of week, month effects")
+      # Enhanced feature preparation with advanced options
     def prepare_ml_features(df, feature_set):
-        """Prepare feature matrix for ML models"""
+        """Prepare comprehensive feature matrix for ML models with advanced engineering"""
         df = df.copy()
         
         # Sort by date
         df = df.sort_values('trading_date').reset_index(drop=True)
         
-        # Calculate additional technical features
+        # Basic technical features
         df['price_change'] = df['close_price'].pct_change()
         df['price_sma_5'] = df['close_price'].rolling(5).mean()
         df['price_sma_10'] = df['close_price'].rolling(10).mean() 
@@ -2691,9 +3110,70 @@ def show_ml_prediction_page():
         df['momentum_3'] = df['close_price'] / df['close_price'].shift(3) - 1
         df['momentum_7'] = df['close_price'] / df['close_price'].shift(7) - 1
         
+        # Advanced feature engineering based on user selections
+        if 'add_lagged_features' in locals() and add_lagged_features:
+            # Add lagged price features
+            for lag in [1, 2, 3, 5, 10]:
+                df[f'price_lag_{lag}'] = df['close_price'].shift(lag)
+                df[f'return_lag_{lag}'] = df['close_price'].pct_change(lag)
+        
+        if 'add_volatility_regime' in locals() and add_volatility_regime:
+            # Volatility regime classification
+            vol_20 = df['close_price'].rolling(20).std()
+            vol_percentiles = vol_20.quantile([0.33, 0.67])
+            df['volatility_regime'] = 0  # Low
+            df.loc[vol_20 > vol_percentiles.iloc[0], 'volatility_regime'] = 1  # Medium
+            df.loc[vol_20 > vol_percentiles.iloc[1], 'volatility_regime'] = 2  # High
+        
+        if 'add_trend_strength' in locals() and add_trend_strength:
+            # Trend strength indicator
+            df['trend_strength'] = abs(df['close_price'].rolling(10).apply(
+                lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) == 10 else 0, raw=False
+            ))
+        
+        if 'add_seasonality' in locals() and add_seasonality:
+            # Add seasonal features
+            df['day_of_week'] = df['trading_date'].dt.dayofweek
+            df['month'] = df['trading_date'].dt.month
+            df['quarter'] = df['trading_date'].dt.quarter
+        
+        # Calculate additional technical indicators
+        # Bollinger Band position
+        if 'close_price' in df.columns:
+            bb_period = 20
+            bb_std = 2
+            df['bb_middle'] = df['close_price'].rolling(bb_period).mean()
+            df['bb_std'] = df['close_price'].rolling(bb_period).std()
+            df['bb_upper'] = df['bb_middle'] + (bb_std * df['bb_std'])
+            df['bb_lower'] = df['bb_middle'] - (bb_std * df['bb_std'])
+            df['bb_position'] = (df['close_price'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+            df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+        
+        # Rate of change features
+        df['roc_5'] = df['close_price'].pct_change(5)
+        df['roc_10'] = df['close_price'].pct_change(10)
+        df['roc_20'] = df['close_price'].pct_change(20)
+        
         # Select features based on feature_set
-        base_features = ['close_price', 'price_change', 'volatility_5', 'volatility_20', 
-                        'price_vs_sma5', 'price_vs_sma20', 'momentum_3', 'momentum_7']
+        base_features = [
+            'close_price', 'price_change', 'volatility_5', 'volatility_20', 
+            'price_vs_sma5', 'price_vs_sma20', 'momentum_3', 'momentum_7',
+            'bb_position', 'bb_width', 'roc_5', 'roc_10', 'roc_20'
+        ]
+        
+        # Add advanced features if selected
+        if 'add_lagged_features' in locals() and add_lagged_features:
+            base_features.extend([f'price_lag_{lag}' for lag in [1, 2, 3, 5, 10]])
+            base_features.extend([f'return_lag_{lag}' for lag in [1, 2, 3, 5, 10]])
+        
+        if 'add_volatility_regime' in locals() and add_volatility_regime:
+            base_features.append('volatility_regime')
+        
+        if 'add_trend_strength' in locals() and add_trend_strength:
+            base_features.append('trend_strength')
+        
+        if 'add_seasonality' in locals() and add_seasonality:
+            base_features.extend(['day_of_week', 'month', 'quarter'])
         
         if feature_set in ["Volume + Technical", "All Features"]:
             volume_features = ['volume', 'volume_ma_20', 'relative_volume', 'vwap', 'obv_raw', 'mfi']
@@ -2704,12 +3184,13 @@ def show_ml_prediction_page():
             base_features.extend([f for f in extra_features if f in df.columns])
         
         # Create feature matrix
-        feature_df = df[['trading_date'] + base_features].copy()
+        available_features = [f for f in base_features if f in df.columns]
+        feature_df = df[['trading_date'] + available_features].copy()
         
         # Forward fill missing values
         feature_df = feature_df.fillna(method='ffill').fillna(method='bfill')
         
-        return feature_df, base_features
+        return feature_df, available_features
     
     # Prepare data
     try:
@@ -2744,141 +3225,321 @@ def show_ml_prediction_page():
     y_train = train_df['target'].values
     X_test = test_df[feature_names].values 
     y_test = test_df['target'].values
+      # Enhanced model training with advanced algorithms
+    st.markdown("## 🧠 Advanced Model Training & Predictions")
     
-    # Scale features
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    # Create different scalers for different model types
+    standard_scaler = StandardScaler()
+    minmax_scaler = MinMaxScaler()
     
-    # Train models
-    st.markdown("## 🧠 Model Training & Predictions")
+    X_train_standard = standard_scaler.fit_transform(X_train)
+    X_test_standard = standard_scaler.transform(X_test)
+    X_train_minmax = minmax_scaler.fit_transform(X_train)
+    X_test_minmax = minmax_scaler.transform(X_test)
     
-    with st.spinner("Training ML models..."):
-        models = {}
-        predictions = {}
+    # Model training with progress tracking
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    models = {}
+    predictions = {}
+    model_info = {}
+    
+    def train_model_with_progress(model_name, model_func, progress_value):
+        """Train a model with progress updates"""
+        status_text.text(f"Training {model_name}...")
+        progress_bar.progress(progress_value)
+        try:
+            model, pred, info = model_func()
+            models[model_name] = model
+            predictions[model_name] = pred
+            model_info[model_name] = info
+            return True
+        except Exception as e:
+            st.warning(f"Failed to train {model_name}: {str(e)}")
+            return False
+    
+    total_models = 0
+    completed_models = 0
+    
+    # Count total models to train
+    if model_type in ["Random Forest", "Ensemble (All Available)"]:
+        total_models += 1
+    if model_type in ["Linear Regression", "Ensemble (All Available)"]:
+        total_models += 1
+    if model_type in ["Gradient Boosting", "Ensemble (All Available)"]:
+        total_models += 1
+    if model_type in ["XGBoost", "Ensemble (All Available)"] and ADVANCED_MODELS_AVAILABLE.get('XGBoost', False):
+        total_models += 1
+    if model_type in ["LightGBM", "Ensemble (All Available)"] and ADVANCED_MODELS_AVAILABLE.get('LightGBM', False):
+        total_models += 1
+    if model_type in ["LSTM Neural Network", "Ensemble (All Available)"] and ADVANCED_MODELS_AVAILABLE.get('LSTM', False):
+        total_models += 1
+    if model_type in ["Prophet (Time Series)", "Ensemble (All Available)"] and ADVANCED_MODELS_AVAILABLE.get('Prophet', False):
+        total_models += 1
+    if model_type == "Classification (Buy/Sell/Hold)":
+        total_models += 2  # We'll train multiple classification models
+    
+    if total_models == 0:
+        total_models = 1  # Prevent division by zero
+    
+    # Random Forest
+    if model_type in ["Random Forest", "Ensemble (All Available)"]:
+        def train_rf():
+            if optimize_hyperparams:
+                rf_param_grid = {
+                    'n_estimators': [50, 100, 200],
+                    'max_depth': [5, 10, 15, None],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4]
+                }
+                rf_model = RandomForestRegressor(random_state=42)
+                rf_grid = GridSearchCV(rf_model, rf_param_grid, cv=3, scoring='neg_mean_squared_error', n_jobs=-1)
+                rf_grid.fit(X_train_standard, y_train)
+                model = rf_grid.best_estimator_
+                info = {"best_params": rf_grid.best_params_, "cv_score": rf_grid.best_score_}
+            else:
+                model = RandomForestRegressor(n_estimators=100, random_state=42, max_depth=10, n_jobs=-1)
+                model.fit(X_train_standard, y_train)
+                info = {"n_estimators": 100, "max_depth": 10}
+            
+            pred = model.predict(X_test_standard)
+            return model, pred, info
         
-        if model_type in ["Random Forest", "Ensemble"]:
-            rf_model = RandomForestRegressor(n_estimators=100, random_state=42, max_depth=10)
-            rf_model.fit(X_train_scaled, y_train)
-            models['Random Forest'] = rf_model
-            predictions['Random Forest'] = rf_model.predict(X_test_scaled)
+        if train_model_with_progress("Random Forest", train_rf, (completed_models + 1) / total_models):
+            completed_models += 1
+    
+    # Linear Regression
+    if model_type in ["Linear Regression", "Ensemble (All Available)"]:
+        def train_lr():
+            model = LinearRegression()
+            model.fit(X_train_standard, y_train)
+            pred = model.predict(X_test_standard)
+            info = {"intercept": model.intercept_, "n_features": len(model.coef_)}
+            return model, pred, info
         
-        if model_type in ["Linear Regression", "Ensemble"]:
-            lr_model = LinearRegression()
-            lr_model.fit(X_train_scaled, y_train)
-            models['Linear Regression'] = lr_model
-            predictions['Linear Regression'] = lr_model.predict(X_test_scaled)
+        if train_model_with_progress("Linear Regression", train_lr, (completed_models + 1) / total_models):
+            completed_models += 1
+    
+    # Gradient Boosting
+    if model_type in ["Gradient Boosting", "Ensemble (All Available)"]:
+        def train_gb():
+            if optimize_hyperparams:
+                gb_param_grid = {
+                    'n_estimators': [50, 100, 200],
+                    'learning_rate': [0.05, 0.1, 0.2],
+                    'max_depth': [3, 5, 7]
+                }
+                gb_model = GradientBoostingRegressor(random_state=42)
+                gb_grid = GridSearchCV(gb_model, gb_param_grid, cv=3, scoring='neg_mean_squared_error', n_jobs=-1)
+                gb_grid.fit(X_train_standard, y_train)
+                model = gb_grid.best_estimator_
+                info = {"best_params": gb_grid.best_params_, "cv_score": gb_grid.best_score_}
+            else:
+                model = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42)
+                model.fit(X_train_standard, y_train)
+                info = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
+            
+            pred = model.predict(X_test_standard)
+            return model, pred, info
         
-        if model_type == "Ensemble":
-            # Ensemble prediction (average of all models)
-            ensemble_pred = np.mean([predictions[name] for name in predictions.keys()], axis=0)
-            predictions['Ensemble'] = ensemble_pred
+        if train_model_with_progress("Gradient Boosting", train_gb, (completed_models + 1) / total_models):
+            completed_models += 1
     
-    # Model Performance
-    st.markdown("### 📊 Model Performance")
-    
-    performance_data = []
-    for name, pred in predictions.items():
-        mae = mean_absolute_error(y_test, pred)
-        rmse = np.sqrt(mean_squared_error(y_test, pred))
+    # XGBoost
+    if model_type in ["XGBoost", "Ensemble (All Available)"] and ADVANCED_MODELS_AVAILABLE.get('XGBoost', False):
+        def train_xgb():
+            import xgboost as xgb
+            if optimize_hyperparams:
+                xgb_param_grid = {
+                    'n_estimators': [50, 100, 200],
+                    'learning_rate': [0.05, 0.1, 0.2],
+                    'max_depth': [3, 5, 7],
+                    'subsample': [0.8, 0.9, 1.0]
+                }
+                xgb_model = xgb.XGBRegressor(random_state=42, eval_metric='rmse')
+                xgb_grid = GridSearchCV(xgb_model, xgb_param_grid, cv=3, scoring='neg_mean_squared_error', n_jobs=-1)
+                xgb_grid.fit(X_train_standard, y_train)
+                model = xgb_grid.best_estimator_
+                info = {"best_params": xgb_grid.best_params_, "cv_score": xgb_grid.best_score_}
+            else:
+                model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42, eval_metric='rmse')
+                model.fit(X_train_standard, y_train)
+                info = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
+            
+            pred = model.predict(X_test_standard)
+            return model, pred, info
         
-        # Directional accuracy (whether prediction direction matches actual direction)
-        dir_accuracy = np.mean(np.sign(pred) == np.sign(y_test)) * 100
+        if train_model_with_progress("XGBoost", train_xgb, (completed_models + 1) / total_models):
+            completed_models += 1
+    
+    # LightGBM
+    if model_type in ["LightGBM", "Ensemble (All Available)"] and ADVANCED_MODELS_AVAILABLE.get('LightGBM', False):
+        def train_lgb():
+            import lightgbm as lgb
+            if optimize_hyperparams:
+                lgb_param_grid = {
+                    'n_estimators': [50, 100, 200],
+                    'learning_rate': [0.05, 0.1, 0.2],
+                    'max_depth': [3, 5, 7, -1],
+                    'num_leaves': [31, 50, 100]
+                }
+                lgb_model = lgb.LGBMRegressor(random_state=42, verbose=-1)
+                lgb_grid = GridSearchCV(lgb_model, lgb_param_grid, cv=3, scoring='neg_mean_squared_error', n_jobs=-1)
+                lgb_grid.fit(X_train_standard, y_train)
+                model = lgb_grid.best_estimator_
+                info = {"best_params": lgb_grid.best_params_, "cv_score": lgb_grid.best_score_}
+            else:
+                model = lgb.LGBMRegressor(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42, verbose=-1)
+                model.fit(X_train_standard, y_train)
+                info = {"n_estimators": 100, "learning_rate": 0.1, "max_depth": 5}
+            
+            pred = model.predict(X_test_standard)
+            return model, pred, info
         
-        performance_data.append({
-            'Model': name,
-            'MAE': f"{mae:.4f}",
-            'RMSE': f"{rmse:.4f}",
-            'Directional Accuracy': f"{dir_accuracy:.1f}%"
-        })
+        if train_model_with_progress("LightGBM", train_lgb, (completed_models + 1) / total_models):
+            completed_models += 1
     
-    performance_df = pd.DataFrame(performance_data)
-    st.dataframe(performance_df, use_container_width=True)
-    
-    # Feature Importance (for Random Forest)
-    if 'Random Forest' in models:
-        st.markdown("### 🎯 Feature Importance")
+    # LSTM Neural Network
+    if model_type in ["LSTM Neural Network", "Ensemble (All Available)"] and ADVANCED_MODELS_AVAILABLE.get('LSTM', False):
+        def train_lstm():
+            from tensorflow.keras.models import Sequential
+            from tensorflow.keras.layers import LSTM, Dense, Dropout
+            from tensorflow.keras.optimizers import Adam
+            import tensorflow as tf
+            
+            # Suppress TensorFlow warnings
+            tf.get_logger().setLevel('ERROR')
+            
+            # Prepare data for LSTM (reshape for sequence)
+            sequence_length = min(10, len(X_train_minmax) // 4)  # Use 10 time steps or quarter of data
+            
+            def create_sequences(X, y, seq_length):
+                X_seq, y_seq = [], []
+                for i in range(seq_length, len(X)):
+                    X_seq.append(X[i-seq_length:i])
+                    y_seq.append(y[i])
+                return np.array(X_seq), np.array(y_seq)
+            
+            X_train_seq, y_train_seq = create_sequences(X_train_minmax, y_train, sequence_length)
+            X_test_seq, y_test_seq = create_sequences(X_test_minmax, y_test, sequence_length)
+            
+            # Build LSTM model
+            model = Sequential([
+                LSTM(50, return_sequences=True, input_shape=(sequence_length, X_train_minmax.shape[1])),
+                Dropout(0.2),
+                LSTM(50, return_sequences=False),
+                Dropout(0.2),
+                Dense(25),
+                Dense(1)
+            ])
+            
+            model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+            
+            # Train with minimal epochs for demo
+            model.fit(X_train_seq, y_train_seq, epochs=20, batch_size=32, verbose=0, validation_split=0.2)
+            
+            # Make predictions
+            pred_seq = model.predict(X_test_seq, verbose=0)
+            
+            # Pad predictions to match original test set length
+            pred = np.full(len(y_test), np.nan)
+            pred[sequence_length:] = pred_seq.flatten()
+            pred[:sequence_length] = pred_seq[0]  # Fill initial values with first prediction
+            
+            info = {"sequence_length": sequence_length, "epochs": 20, "architecture": "LSTM-50-50-25-1"}
+            return model, pred, info
         
-        importance = models['Random Forest'].feature_importances_
-        feature_importance_df = pd.DataFrame({
-            'Feature': feature_names,
-            'Importance': importance
-        }).sort_values('Importance', ascending=False)
+        if train_model_with_progress("LSTM Neural Network", train_lstm, (completed_models + 1) / total_models):
+            completed_models += 1
+    
+    # Prophet Time Series Model
+    if model_type in ["Prophet (Time Series)", "Ensemble (All Available)"] and ADVANCED_MODELS_AVAILABLE.get('Prophet', False):
+        def train_prophet():
+            from prophet import Prophet
+            
+            # Prepare Prophet data format
+            prophet_df = pd.DataFrame({
+                'ds': target_df['trading_date'],
+                'y': target_df['target']
+            })
+            
+            train_prophet_df = prophet_df.iloc[:train_size]
+            test_prophet_df = prophet_df.iloc[train_size:]
+            
+            # Create and train Prophet model
+            model = Prophet(
+                yearly_seasonality=True,
+                weekly_seasonality=True,
+                daily_seasonality=False,
+                changepoint_prior_scale=0.05
+            )
+              # Add additional regressors if available
+            if 'volatility_20' in feature_df.columns:
+                model.add_regressor('volatility_20')
+                train_prophet_df['volatility_20'] = target_df['volatility_20'].iloc[:train_size]
+                test_prophet_df['volatility_20'] = target_df['volatility_20'].iloc[train_size:]
+            
+            model.fit(train_prophet_df)
+            
+            # Make predictions
+            forecast = model.predict(test_prophet_df)
+            pred = forecast['yhat'].values
+            
+            info = {
+                "seasonality": "yearly+weekly",
+                "changepoint_prior_scale": 0.05,
+                "n_changepoints": len(model.changepoints)
+            }
+            
+            return model, pred, info
         
-        fig_importance = go.Figure()
-        fig_importance.add_trace(go.Bar(
-            x=feature_importance_df['Importance'][:10],
-            y=feature_importance_df['Feature'][:10],
-            orientation='h',
-            marker_color='lightblue',
-            text=[f"{x:.3f}" for x in feature_importance_df['Importance'][:10]],
-            textposition='inside'
-        ))
+        if train_model_with_progress("Prophet (Time Series)", train_prophet, (completed_models + 1) / total_models):
+            completed_models += 1
+    
+    # Complete progress
+    progress_bar.progress(1.0)
+    status_text.text("Training complete!")
+    
+    # Model performance comparison
+    if predictions:
+        st.markdown("## 📊 Model Performance Analysis")
         
-        fig_importance.update_layout(
-            title="Top 10 Most Important Features",
-            xaxis_title="Importance Score",
-            yaxis={'categoryorder': 'total ascending'},
-            height=400
-        )
+        # Calculate performance metrics for each model
+        metrics_df = []
+        for name, pred in predictions.items():
+            if pred is not None and len(pred) == len(y_test):
+                mae = mean_absolute_error(y_test, pred)
+                rmse = np.sqrt(mean_squared_error(y_test, pred))
+                
+                metrics_df.append({
+                    'Model': name,
+                    'MAE': mae,
+                    'RMSE': rmse,
+                    'Score': -rmse  # Negative RMSE for ranking (higher is better)
+                })
         
-        st.plotly_chart(fig_importance, use_container_width=True)
-    
-    # Prediction Results Visualization
-    st.markdown("### 📈 Prediction vs Actual Results")
-    
-    # Choose best performing model for visualization
-    best_model_name = min(predictions.keys(), 
-                         key=lambda x: mean_absolute_error(y_test, predictions[x]))
-    
-    best_predictions = predictions[best_model_name]
-    
-    # Create prediction chart
-    fig_pred = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                            vertical_spacing=0.05, row_heights=[0.7, 0.3],
-                            subplot_titles=(f'Actual vs Predicted Returns ({best_model_name})', 
-                                          'Prediction Errors'))
-    
-    test_dates = test_df['trading_date'].values
-    
-    # Actual vs Predicted
-    fig_pred.add_trace(go.Scatter(
-        x=test_dates, y=y_test * 100,
-        mode='lines', name='Actual Returns (%)',
-        line=dict(color='blue', width=2)
-    ), row=1, col=1)
-    
-    fig_pred.add_trace(go.Scatter(
-        x=test_dates, y=best_predictions * 100,
-        mode='lines', name='Predicted Returns (%)',
-        line=dict(color='red', width=2, dash='dash')
-    ), row=1, col=1)
-    
-    # Prediction errors
-    errors = (best_predictions - y_test) * 100
-    fig_pred.add_trace(go.Scatter(
-        x=test_dates, y=errors,
-        mode='lines', name='Prediction Error (%)',
-        line=dict(color='gray', width=1),
-        fill='tozeroy', fillcolor='rgba(128,128,128,0.2)'
-    ), row=2, col=1)
-    
-    fig_pred.add_hline(y=0, line_dash="dash", line_color="black", row=2, col=1)
-    
-    fig_pred.update_layout(
-        title="Model Prediction Performance Over Time",
-        height=600,
-        hovermode='x unified'
-    )
-    
-    st.plotly_chart(fig_pred, use_container_width=True)
+        if metrics_df:
+            metrics_df = pd.DataFrame(metrics_df)
+            metrics_df = metrics_df.sort_values('Score', ascending=False)
+            
+            # Display metrics
+            st.dataframe(metrics_df, use_container_width=True)
+            
+            # Best model
+            best_model = metrics_df.iloc[0]['Model']
+            st.success(f"🏆 Best performing model: **{best_model}**")
+        
+        else:
+            st.warning("No valid predictions to compare.")
+    else:
+        st.warning("No models available for analysis.")
     
     # Future Prediction
     st.markdown("### 🔮 Future Price Forecast")
-    
-    # Get the most recent data point for prediction
+      # Get the most recent data point for prediction
     latest_features = feature_df[feature_names].iloc[-1:].values
-    latest_features_scaled = scaler.transform(latest_features)
+    latest_features_scaled = standard_scaler.transform(latest_features)
     
     # Make predictions with all models
     future_predictions = {}
@@ -2991,7 +3652,7 @@ def show_ml_prediction_page():
         recommendation = "🟡 **NEUTRAL** - Mixed signals"
         strategy = "Wait for clearer directional signals"
     
-    st.markdown(recommendation)
+        st.markdown(recommendation)
     st.markdown(f"**Strategy:** {strategy}")
     
     # Disclaimer for ML predictions
@@ -3006,6 +3667,141 @@ def show_ml_prediction_page():
     """)
 
 
+def show_flight_status_page():
+    """Show the Flight Status Dashboard page"""
+    
+    # Header
+    st.title("🛩️ Stock Flight Status Dashboard")
+    
+    # Description
+    st.markdown("""
+    **Real-time stock analysis across your entire portfolio - Just like tracking flights at the airport!**
+    
+    Each stock shows its current "departure status":
+    - 🟢 **Buy Signals**: Ready for takeoff (good entry opportunities)
+    - 🔴 **Sell Signals**: Delayed/cancelled (consider exit strategies)
+    - 🟡 **Hold**: On schedule (maintain current positions)
+    """)
+    
+    with st.expander("ℹ️ How to Read the Dashboard", expanded=False):
+        st.markdown("""
+        **Signal Score**: -5 to +5
+        - **+4,+5**: Strong Buy
+        - **+1 to +3**: Buy
+        - **0**: Hold/Neutral
+        - **-1 to -3**: Sell
+        - **-4,-5**: Strong Sell
+        
+        **Technical Indicators**:
+        - **RSI**: Momentum (30-70 normal)
+        - **MACD**: Trend direction
+        - **SMA**: Long-term trend vs 200-day
+        
+        **Data Sources**: Your SQL Server database views
+        """)
+    
+    # Index Selection
+    index_name = st.selectbox(
+        "Select Index",
+        ["NSE 500", "NASDAQ 100"],
+        help="Choose which market index to analyze"
+    )
+    
+    # Load data
+    with st.spinner(f"🛩️ Loading flight status for {index_name}..."):
+        df = load_flight_status_data(index_name, limit=100)  # Limit for performance
+    
+    if df.empty:
+        st.error("❌ No data available. Please check your database connection and table structure.")
+        return
+    
+    # Summary metrics
+    render_flight_status_summary_metrics(df)
+    
+    st.markdown("---")
+    
+    # Apply filters
+    filtered_df = apply_flight_status_filters(df)
+    
+    if filtered_df.empty:
+        st.warning("⚠️ No stocks match your current filters. Try adjusting the filter criteria.")
+        return
+    
+    # Main flight status table
+    st.subheader(f"🛩️ Flight Status Board ({len(filtered_df)} stocks)")
+    
+    # Prepare display data
+    display_df = filtered_df.copy()
+    display_df['Status'] = display_df['signal_score'].apply(get_flight_status_emoji)
+    display_df['Signal Score'] = display_df['signal_score']
+    display_df['RSI'] = display_df['RSI'].round(1)
+    display_df['Change %'] = display_df['daily_change_pct'].round(2)
+    display_df['Price'] = display_df['close_price'].round(2)
+    
+    # Select columns for display
+    columns_to_show = [
+        'Status', 'ticker', 'company', 'Signal Score', 'Price', 'Change %',
+        'RSI', 'rsi_status', 'macd_trend', 'long_term_trend', 'last_update'
+    ]
+    
+    # Display the table
+    st.dataframe(
+        display_df[columns_to_show],
+        use_container_width=True,
+        height=600,
+        column_config={
+            'Status': st.column_config.TextColumn(
+                '✈️ Status',
+                help='Flight departure status'
+            ),
+            'ticker': st.column_config.TextColumn(
+                '🏷️ Symbol',
+                help='Stock ticker symbol'
+            ),
+            'company': st.column_config.TextColumn(
+                '🏢 Company',
+                help='Company name'
+            ),
+            'Signal Score': st.column_config.NumberColumn(
+                '📊 Score',
+                help='Combined signal strength (-5 to +5)',
+                min_value=-5,
+                max_value=5,
+                format='%d'
+            ),
+            'Price': st.column_config.NumberColumn(
+                '💰 Price',
+                help='Latest close price',
+                format='$%.2f'
+            ),
+            'Change %': st.column_config.NumberColumn(
+                '📈 Change %',
+                help='Daily change percentage',
+                format='%.2f%%'
+            ),
+            'RSI': st.column_config.NumberColumn(
+                '📊 RSI',
+                help='Relative Strength Index',
+                format='%.1f'
+            ),
+            'last_update': st.column_config.DatetimeColumn(
+                '📅 Updated',
+                help='Last update timestamp'
+            )
+        }
+    )
+    
+    # Export functionality
+    if st.button("📥 Export to CSV"):
+        csv = filtered_df.to_csv(index=False)
+        st.download_button(
+            label="💾 Download CSV",
+            data=csv,
+            file_name=f"flight_status_{index_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv"
+        )
+
+
 # Main application routing
 if page == "🏠 Home & Filters":
     show_home_page()
@@ -3013,3 +3809,5 @@ elif page == "📈 Technical Analysis":
     show_technical_analysis_page()
 elif page == "🤖 AI Price Predictions":
     show_ml_prediction_page()
+elif page == "🛩️ Flight Status Dashboard":
+    show_flight_status_page()

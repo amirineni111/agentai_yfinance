@@ -1,0 +1,19 @@
+[theme]
+# Choose: "light" or "dark"
+base = "dark"
+
+# Custom colors (optional - uncomment to customize)
+primaryColor = "#FF4B4B"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#262730"
+textColor = "#FAFAFA"
+
+# Font
+font = "sans serif"
+
+[server]
+headless = false
+port = 8501
+
+[browser]
+gatherUsageStats = false
