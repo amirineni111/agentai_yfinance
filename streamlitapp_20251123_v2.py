@@ -9,6 +9,18 @@ from datetime import datetime
 import io
 import base64
 
+# Configure Streamlit page settings first
+st.set_page_config(
+    page_title="📈 Advanced Trading Dashboard", 
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={
+        'Get Help': 'https://docs.streamlit.io/library/api-reference',
+        'Report a bug': None,
+        'About': "Advanced Trading Dashboard with Interactive Charts"
+    }
+)
+
 # ----------------------------
 # DB CONNECTION
 # ----------------------------
@@ -2341,15 +2353,27 @@ if st.sidebar.button("🔄 Reset Database Connections", help="Click if you're ex
 # ----------------------------
 # PAGE NAVIGATION
 # ----------------------------
+st.title("📊 Advanced Stock Trading Dashboard with AI Analysis")
+
+# ----------------------------
+# SIDEBAR - DATABASE CONNECTION MANAGEMENT  
+# ----------------------------
+st.sidebar.header("🔧 Database Management")
+if st.sidebar.button("🔄 Reset Database Connections", key="reset_db_sidebar", help="Click if you're experiencing database connection issues"):
+    reset_database_connections()
+
+# ----------------------------
+# PAGE NAVIGATION
+# ----------------------------
 st.sidebar.header("📊 Dashboard Controls")
 
 # Page Navigation
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard"],
+    ["🏠 Home & Filters", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions"],
     index=0,
-    key="page_selector"
+    key="main_page_selector"
 )
 
 st.sidebar.markdown("---")
@@ -2459,19 +2483,19 @@ def show_home_page():
         # Quick date range buttons
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            if st.button("📅 Last 1M", key="home_1m"):
+            if st.button("📅 Last 1M", key="home_1m_filter"):
                 start_date_quick = date_max - pd.DateOffset(months=1)
                 st.session_state.date_range = [start_date_quick, date_max]
         with col2:
-            if st.button("📅 Last 3M", key="home_3m"):
+            if st.button("📅 Last 3M", key="home_3m_filter"):
                 start_date_quick = date_max - pd.DateOffset(months=3)
                 st.session_state.date_range = [start_date_quick, date_max]
         with col3:
-            if st.button("📅 Last 6M", key="home_6m"):
+            if st.button("📅 Last 6M", key="home_6m_filter"):
                 start_date_quick = date_max - pd.DateOffset(months=6)
                 st.session_state.date_range = [start_date_quick, date_max]
         with col4:
-            if st.button("📅 Last 1Y", key="home_1y"):
+            if st.button("📅 Last 1Y", key="home_1y_filter"):
                 start_date_quick = date_max - pd.DateOffset(years=1)
                 st.session_state.date_range = [start_date_quick, date_max]
 
@@ -3809,14 +3833,491 @@ def show_flight_status_page():
     )
     
     # Export functionality
-    if st.button("📥 Export to CSV"):
+    if st.button("📥 Export to CSV", key="flight_export_csv"):
         csv = filtered_df.to_csv(index=False)
         st.download_button(
             label="💾 Download CSV",
             data=csv,
             file_name=f"flight_status_{index_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-            mime="text/csv"
+            mime="text/csv",
+            key="flight_download_csv"
         )
+
+
+def show_nasdaq_ml_predictions_page():
+    """Show NASDAQ ML Predictions page with separate filters"""
+    st.title("📊 NASDAQ ML Predictions Dashboard")
+    
+    st.markdown("""
+    ### 🤖 Advanced Machine Learning Predictions for NASDAQ Stocks
+    
+    This page provides ML-powered insights using dedicated prediction models trained on NASDAQ data.
+    
+    ---
+    """)
+    
+    # Separate filters for this page
+    st.sidebar.header("📊 NASDAQ ML Filters")
+    
+    # Date filter
+    col1, col2 = st.columns(2)
+    with col1:
+        date_type = st.selectbox(
+            "📅 Date Selection Type:",
+            ["Date Range", "Single Date"],
+            key="nasdaq_ml_date_type"
+        )
+    
+    if date_type == "Single Date":
+        selected_date = st.date_input(
+            "📅 Select Date:",
+            value=datetime.now().date(),
+            key="nasdaq_ml_single_date"
+        )
+        start_date = end_date = selected_date
+    else:
+        with col2:
+            date_range = st.date_input(
+                "📅 Select Date Range:",
+                value=[datetime.now().date() - pd.Timedelta(days=30), datetime.now().date()],
+                key="nasdaq_ml_date_range"
+            )
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+        else:
+            start_date = end_date = date_range[0]
+    
+    # Ticker filter
+    ticker_input = st.text_input(
+        "🔍 Ticker Symbol (optional):",
+        placeholder="e.g., AAPL, MSFT, TSLA",
+        key="nasdaq_ml_ticker"
+    ).upper()
+    
+    # Load data button
+    if st.button("📊 Load NASDAQ ML Data", key="load_nasdaq_ml"):
+        with st.spinner("Loading NASDAQ ML prediction data..."):
+            try:
+                # Query ml_prediction_summary (this is a summary table, no ticker filtering)
+                summary_query = f"""
+                SELECT TOP 1000 *
+                FROM dbo.ml_prediction_summary
+                WHERE run_date BETWEEN '{start_date}' AND '{end_date}'
+                ORDER BY run_date DESC
+                """
+                # Note: ml_prediction_summary doesn't have ticker column - it's an aggregate summary
+                
+                summary_df = execute_query_safe(summary_query)
+                
+                # Query ml_technical_indicators
+                indicators_query = f"""
+                SELECT TOP 1000 *
+                FROM dbo.ml_technical_indicators
+                WHERE trading_date BETWEEN '{start_date}' AND '{end_date}'
+                """
+                if ticker_input:
+                    indicators_query += f" AND ticker = '{ticker_input}'"
+                indicators_query += " ORDER BY trading_date DESC, ticker"
+                
+                indicators_df = execute_query_safe(indicators_query)
+                
+                # Query ml_trading_predictions
+                predictions_query = f"""
+                SELECT TOP 1000 *
+                FROM dbo.ml_trading_predictions
+                WHERE trading_date BETWEEN '{start_date}' AND '{end_date}'
+                """
+                if ticker_input:
+                    predictions_query += f" AND ticker = '{ticker_input}'"
+                predictions_query += " ORDER BY trading_date DESC, ticker"
+                
+                predictions_df = execute_query_safe(predictions_query)
+                
+                # Display results
+                if not summary_df.empty:
+                    st.markdown("### 📊 ML Prediction Summary")
+                    
+                    # Summary metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Predictions", len(summary_df))
+                    with col2:
+                        unique_tickers = summary_df['ticker'].nunique() if 'ticker' in summary_df.columns else 0
+                        st.metric("Unique Tickers", unique_tickers)
+                    with col3:
+                        if 'confidence_score' in summary_df.columns:
+                            avg_confidence = summary_df['confidence_score'].mean()
+                            st.metric("Avg Confidence", f"{avg_confidence:.2f}%")
+                    with col4:
+                        if 'predicted_direction' in summary_df.columns:
+                            bullish_count = len(summary_df[summary_df['predicted_direction'].str.contains('UP|BUY|BULL', case=False, na=False)])
+                            st.metric("Bullish Signals", bullish_count)
+                    
+                    # Display summary table with enhanced formatting
+                    st.dataframe(
+                        summary_df,
+                        use_container_width=True,
+                        column_config={
+                            'run_date': st.column_config.DateColumn('📅 Run Date'),
+                            'total_predictions': st.column_config.NumberColumn('🔢 Total Predictions'),
+                            'avg_confidence': st.column_config.NumberColumn('🎯 Avg Confidence %', format='%.1f%%'),
+                            'buy_signals': st.column_config.NumberColumn('📈 Buy Signals'),
+                            'sell_signals': st.column_config.NumberColumn('📉 Sell Signals')
+                        }
+                    )
+                    
+                    # Export functionality
+                    csv_summary = summary_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Summary (CSV)",
+                        data=csv_summary,
+                        file_name=f"nasdaq_ml_summary_{start_date}_{end_date}.csv",
+                        mime="text/csv",
+                        key="download_nasdaq_summary"
+                    )
+                else:
+                    st.warning("No prediction summary data found for the selected criteria.")
+                
+                # Technical Indicators Section
+                if not indicators_df.empty:
+                    st.markdown("### 📈 Technical Indicators Analysis")
+                    
+                    # Indicators metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        if 'rsi' in indicators_df.columns:
+                            avg_rsi = indicators_df['rsi'].mean()
+                            st.metric("Avg RSI", f"{avg_rsi:.1f}")
+                    with col2:
+                        if 'macd_trend' in indicators_df.columns:
+                            bullish_macd = len(indicators_df[indicators_df['macd_trend'].str.contains('UP|BULL', case=False, na=False)])
+                            st.metric("Bullish MACD Trend", bullish_macd)
+                    with col3:
+                        if 'trend_direction' in indicators_df.columns:
+                            uptrend = len(indicators_df[indicators_df['trend_direction'].str.contains('UP|BULL', case=False, na=False)])
+                            st.metric("Uptrend Stocks", uptrend)
+                    with col4:
+                        if 'volume_sma_ratio' in indicators_df.columns:
+                            high_volume = len(indicators_df[indicators_df['volume_sma_ratio'] > 1.5])
+                            st.metric("High Volume", high_volume)
+                    
+                    st.dataframe(indicators_df, use_container_width=True)
+                    
+                    # Export indicators
+                    csv_indicators = indicators_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Indicators (CSV)",
+                        data=csv_indicators,
+                        file_name=f"nasdaq_ml_indicators_{start_date}_{end_date}.csv",
+                        mime="text/csv",
+                        key="download_nasdaq_indicators"
+                    )
+                else:
+                    st.info("No technical indicators data found for the selected criteria.")
+                
+                # Trading Predictions Section
+                if not predictions_df.empty:
+                    st.markdown("### 🎯 Trading Predictions")
+                    
+                    # Predictions metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Predictions", len(predictions_df))
+                    with col2:
+                        if 'recommendation' in predictions_df.columns:
+                            buy_recommendations = len(predictions_df[predictions_df['recommendation'].str.contains('BUY', case=False, na=False)])
+                            st.metric("Buy Recommendations", buy_recommendations)
+                    with col3:
+                        if 'risk_level' in predictions_df.columns:
+                            high_risk = len(predictions_df[predictions_df['risk_level'].str.contains('HIGH', case=False, na=False)])
+                            st.metric("High Risk", high_risk)
+                    with col4:
+                        if 'expected_return' in predictions_df.columns:
+                            avg_return = predictions_df['expected_return'].mean()
+                            st.metric("Avg Expected Return", f"{avg_return:.2f}%")
+                    
+                    st.dataframe(
+                        predictions_df,
+                        use_container_width=True,
+                        column_config={
+                            'prediction_date': st.column_config.DateColumn('📅 Date'),
+                            'ticker': st.column_config.TextColumn('🏢 Ticker'),
+                            'recommendation': st.column_config.TextColumn('💡 Recommendation'),
+                            'expected_return': st.column_config.NumberColumn('📈 Expected Return %', format='%.2f%%'),
+                            'risk_level': st.column_config.TextColumn('⚠️ Risk Level')
+                        }
+                    )
+                    
+                    # Export predictions
+                    csv_predictions = predictions_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Predictions (CSV)",
+                        data=csv_predictions,
+                        file_name=f"nasdaq_ml_predictions_{start_date}_{end_date}.csv",
+                        mime="text/csv",
+                        key="download_nasdaq_predictions"
+                    )
+                else:
+                    st.info("No trading predictions data found for the selected criteria.")
+                
+            except Exception as e:
+                st.error(f"Error loading data: {str(e)}")
+    
+    # Information section
+    with st.expander("ℹ️ About NASDAQ ML Predictions", expanded=False):
+        st.markdown("""
+        **Data Sources:**
+        - `dbo.ml_prediction_summary`: High-level ML prediction results
+        - `dbo.ml_technical_indicators`: Technical analysis with ML enhancements
+        - `dbo.ml_trading_predictions`: Specific trading recommendations
+        
+        **Features:**
+        - Date range or single date filtering
+        - Ticker-specific analysis
+        - Comprehensive ML metrics
+        - Downloadable reports in CSV format
+        - Real-time confidence scoring
+        """)
+
+
+def show_nse_ml_predictions_page():
+    """Show NSE ML Predictions page with separate filters"""
+    st.title("📈 NSE ML Predictions Dashboard")
+    
+    st.markdown("""
+    ### 🤖 Advanced Machine Learning Predictions for NSE Stocks
+    
+    This page provides ML-powered insights using dedicated prediction models trained on NSE 500 data.
+    
+    ---
+    """)
+    
+    # Separate filters for this page
+    st.sidebar.header("📈 NSE ML Filters")
+    
+    # Date filter
+    col1, col2 = st.columns(2)
+    with col1:
+        date_type = st.selectbox(
+            "📅 Date Selection Type:",
+            ["Date Range", "Single Date"],
+            key="nse_ml_date_type"
+        )
+    
+    if date_type == "Single Date":
+        selected_date = st.date_input(
+            "📅 Select Date:",
+            value=datetime.now().date(),
+            key="nse_ml_single_date"
+        )
+        start_date = end_date = selected_date
+    else:
+        with col2:
+            date_range = st.date_input(
+                "📅 Select Date Range:",
+                value=[datetime.now().date() - pd.Timedelta(days=30), datetime.now().date()],
+                key="nse_ml_date_range"
+            )
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+        else:
+            start_date = end_date = date_range[0]
+    
+    # Ticker filter
+    ticker_input = st.text_input(
+        "🔍 Ticker Symbol (optional):",
+        placeholder="e.g., RELIANCE, TCS, INFY",
+        key="nse_ml_ticker"
+    ).upper()
+    
+    # Load data button
+    if st.button("📈 Load NSE ML Data", key="load_nse_ml"):
+        with st.spinner("Loading NSE ML prediction data..."):
+            try:
+                # Query ml_nse_predict_summary (this is a summary table, no ticker filtering)
+                summary_query = f"""
+                SELECT TOP 1000 *
+                FROM dbo.ml_nse_predict_summary
+                WHERE analysis_date BETWEEN '{start_date}' AND '{end_date}'
+                ORDER BY analysis_date DESC
+                """
+                # Note: ml_nse_predict_summary doesn't have ticker column - it's an aggregate summary
+                
+                summary_df = execute_query_safe(summary_query)
+                
+                # Query ml_nse_technical_indicators
+                indicators_query = f"""
+                SELECT TOP 1000 *
+                FROM dbo.ml_nse_technical_indicators
+                WHERE trading_date BETWEEN '{start_date}' AND '{end_date}'
+                """
+                if ticker_input:
+                    indicators_query += f" AND ticker = '{ticker_input}'"
+                indicators_query += " ORDER BY trading_date DESC, ticker"
+                
+                indicators_df = execute_query_safe(indicators_query)
+                
+                # Query ml_nse_trading_predictions
+                predictions_query = f"""
+                SELECT TOP 1000 *
+                FROM dbo.ml_nse_trading_predictions
+                WHERE trading_date BETWEEN '{start_date}' AND '{end_date}'
+                """
+                if ticker_input:
+                    predictions_query += f" AND ticker = '{ticker_input}'"
+                predictions_query += " ORDER BY trading_date DESC, ticker"
+                
+                predictions_df = execute_query_safe(predictions_query)
+                
+                # Display results
+                if not summary_df.empty:
+                    st.markdown("### 📊 NSE ML Prediction Summary")
+                    
+                    # Summary metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Predictions", len(summary_df))
+                    with col2:
+                        unique_tickers = summary_df['ticker'].nunique() if 'ticker' in summary_df.columns else 0
+                        st.metric("Unique Tickers", unique_tickers)
+                    with col3:
+                        if 'confidence_score' in summary_df.columns:
+                            avg_confidence = summary_df['confidence_score'].mean()
+                            st.metric("Avg Confidence", f"{avg_confidence:.2f}%")
+                    with col4:
+                        if 'predicted_direction' in summary_df.columns:
+                            bullish_count = len(summary_df[summary_df['predicted_direction'].str.contains('UP|BUY|BULL', case=False, na=False)])
+                            st.metric("Bullish Signals", bullish_count)
+                    
+                    # Display summary table with enhanced formatting
+                    st.dataframe(
+                        summary_df,
+                        use_container_width=True,
+                        column_config={
+                            'analysis_date': st.column_config.DateColumn('📅 Analysis Date'),
+                            'total_predictions': st.column_config.NumberColumn('🔢 Total Predictions'),
+                            'avg_confidence': st.column_config.NumberColumn('🎯 Avg Confidence %', format='%.1f%%'),
+                            'total_buy_signals': st.column_config.NumberColumn('📈 Buy Signals'),
+                            'total_sell_signals': st.column_config.NumberColumn('📉 Sell Signals')
+                        }
+                    )
+                    
+                    # Export functionality
+                    csv_summary = summary_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Summary (CSV)",
+                        data=csv_summary,
+                        file_name=f"nse_ml_summary_{start_date}_{end_date}.csv",
+                        mime="text/csv",
+                        key="download_nse_summary"
+                    )
+                else:
+                    st.warning("No prediction summary data found for the selected criteria.")
+                
+                # Technical Indicators Section
+                if not indicators_df.empty:
+                    st.markdown("### 📈 NSE Technical Indicators Analysis")
+                    
+                    # Indicators metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        if 'rsi' in indicators_df.columns:
+                            avg_rsi = indicators_df['rsi'].mean()
+                            st.metric("Avg RSI", f"{avg_rsi:.1f}")
+                    with col2:
+                        if 'macd_trend' in indicators_df.columns:
+                            bullish_macd = len(indicators_df[indicators_df['macd_trend'].str.contains('UP|BULL', case=False, na=False)])
+                            st.metric("Bullish MACD Trend", bullish_macd)
+                    with col3:
+                        if 'trend_direction' in indicators_df.columns:
+                            uptrend = len(indicators_df[indicators_df['trend_direction'].str.contains('UP|BULL', case=False, na=False)])
+                            st.metric("Uptrend Stocks", uptrend)
+                    with col4:
+                        if 'volume_sma_ratio' in indicators_df.columns:
+                            high_volume = len(indicators_df[indicators_df['volume_sma_ratio'] > 1.5])
+                            st.metric("High Volume", high_volume)
+                    with col4:
+                        if 'volume_trend' in indicators_df.columns:
+                            high_volume = len(indicators_df[indicators_df['volume_trend'].str.contains('HIGH', case=False, na=False)])
+                            st.metric("High Volume", high_volume)
+                    
+                    st.dataframe(indicators_df, use_container_width=True)
+                    
+                    # Export indicators
+                    csv_indicators = indicators_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Indicators (CSV)",
+                        data=csv_indicators,
+                        file_name=f"nse_ml_indicators_{start_date}_{end_date}.csv",
+                        mime="text/csv",
+                        key="download_nse_indicators"
+                    )
+                else:
+                    st.info("No technical indicators data found for the selected criteria.")
+                
+                # Trading Predictions Section
+                if not predictions_df.empty:
+                    st.markdown("### 🎯 NSE Trading Predictions")
+                    
+                    # Predictions metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Predictions", len(predictions_df))
+                    with col2:
+                        if 'recommendation' in predictions_df.columns:
+                            buy_recommendations = len(predictions_df[predictions_df['recommendation'].str.contains('BUY', case=False, na=False)])
+                            st.metric("Buy Recommendations", buy_recommendations)
+                    with col3:
+                        if 'risk_level' in predictions_df.columns:
+                            high_risk = len(predictions_df[predictions_df['risk_level'].str.contains('HIGH', case=False, na=False)])
+                            st.metric("High Risk", high_risk)
+                    with col4:
+                        if 'expected_return' in predictions_df.columns:
+                            avg_return = predictions_df['expected_return'].mean()
+                            st.metric("Avg Expected Return", f"{avg_return:.2f}%")
+                    
+                    st.dataframe(
+                        predictions_df,
+                        use_container_width=True,
+                        column_config={
+                            'prediction_date': st.column_config.DateColumn('📅 Date'),
+                            'ticker': st.column_config.TextColumn('🏢 Ticker'),
+                            'recommendation': st.column_config.TextColumn('💡 Recommendation'),
+                            'expected_return': st.column_config.NumberColumn('📈 Expected Return %', format='%.2f%%'),
+                            'risk_level': st.column_config.TextColumn('⚠️ Risk Level')
+                        }
+                    )
+                    
+                    # Export predictions
+                    csv_predictions = predictions_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Predictions (CSV)",
+                        data=csv_predictions,
+                        file_name=f"nse_ml_predictions_{start_date}_{end_date}.csv",
+                        mime="text/csv",
+                        key="download_nse_predictions"
+                    )
+                else:
+                    st.info("No trading predictions data found for the selected criteria.")
+                
+            except Exception as e:
+                st.error(f"Error loading data: {str(e)}")
+    
+    # Information section
+    with st.expander("ℹ️ About NSE ML Predictions", expanded=False):
+        st.markdown("""
+        **Data Sources:**
+        - `dbo.ml_nse_predict_summary`: High-level ML prediction results
+        - `dbo.ml_nse_technical_indicators`: Technical analysis with ML enhancements
+        - `dbo.ml_nse_trading_predictions`: Specific trading recommendations
+        
+        **Features:**
+        - Date range or single date filtering
+        - Ticker-specific analysis
+        - NSE 500 focused predictions
+        - Downloadable reports in CSV format
+        - Indian market specific insights
+        """)
 
 
 # Main application routing
@@ -3828,3 +4329,7 @@ elif page == "🤖 AI Price Predictions":
     show_ml_prediction_page()
 elif page == "🛩️ Flight Status Dashboard":
     show_flight_status_page()
+elif page == "📊 NASDAQ ML Predictions":
+    show_nasdaq_ml_predictions_page()
+elif page == "📈 NSE ML Predictions":
+    show_nse_ml_predictions_page()
