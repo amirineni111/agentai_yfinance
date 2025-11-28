@@ -2371,7 +2371,7 @@ st.sidebar.header("📊 Dashboard Controls")
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions"],
+    ["🏠 Home & Filters", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions"],
     index=0,
     key="main_page_selector"
 )
@@ -4320,6 +4320,277 @@ def show_nse_ml_predictions_page():
         """)
 
 
+def show_forex_ml_predictions_page():
+    """Show Forex ML Predictions page with separate filters"""
+    st.title("💱 Forex ML Predictions Dashboard")
+    
+    st.markdown("""
+    ### 🌍 Advanced Machine Learning Predictions for Forex Markets
+    
+    This page provides ML-powered insights using dedicated prediction models trained on Forex data.
+    
+    ---
+    """)
+    
+    # Separate filters for this page
+    st.sidebar.header("💱 Forex ML Filters")
+    
+    # Date filter
+    col1, col2 = st.columns(2)
+    with col1:
+        date_type = st.selectbox(
+            "📅 Date Selection Type:",
+            ["Date Range", "Single Date"],
+            key="forex_ml_date_type"
+        )
+    
+    if date_type == "Single Date":
+        selected_date = st.date_input(
+            "📅 Select Date:",
+            value=datetime.now().date(),
+            key="forex_ml_single_date"
+        )
+        start_date = end_date = selected_date
+    else:
+        with col2:
+            date_range = st.date_input(
+                "📅 Select Date Range:",
+                value=[datetime.now().date() - pd.Timedelta(days=30), datetime.now().date()],
+                key="forex_ml_date_range"
+            )
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+        else:
+            start_date = end_date = date_range[0]
+    
+    # Currency pair filter
+    currency_pair_input = st.text_input(
+        "💰 Currency Pair (optional):",
+        placeholder="e.g., EUR/USD, GBP/USD, USD/JPY",
+        key="forex_ml_currency_pair"
+    ).upper()
+    
+    # Load data button
+    if st.button("💱 Load Forex ML Data", key="load_forex_ml"):
+        with st.spinner("Loading Forex ML prediction data..."):
+            try:
+                # Query forex_daily_summary
+                summary_query = f"""
+                SELECT TOP 1000 *
+                FROM dbo.forex_daily_summary
+                """
+                # Add WHERE clause only if we can identify the correct date column
+                # First, let's get the data without date filtering to see the structure
+                summary_query += " ORDER BY 1 DESC"
+                
+                summary_df = execute_query_safe(summary_query)
+                
+                # Display column information for debugging
+                if not summary_df.empty:
+                    st.info(f"Available columns in forex_daily_summary: {', '.join(summary_df.columns.tolist())}")
+                
+                # Query forex_ml_predictions
+                predictions_query = f"""
+                SELECT TOP 1000 *
+                FROM dbo.forex_ml_predictions
+                """
+                # Add WHERE clause only if we can identify the correct date column
+                predictions_query += " ORDER BY 1 DESC"
+                
+                predictions_df = execute_query_safe(predictions_query)
+                
+                # Display column information for debugging
+                if not predictions_df.empty:
+                    st.info(f"Available columns in forex_ml_predictions: {', '.join(predictions_df.columns.tolist())}")
+                
+                # Query forex_model_performance
+                performance_query = f"""
+                SELECT TOP 1000 *
+                FROM dbo.forex_model_performance
+                """
+                # Add WHERE clause only if we can identify the correct date column
+                performance_query += " ORDER BY 1 DESC"
+                
+                performance_df = execute_query_safe(performance_query)
+                
+                # Display column information for debugging
+                if not performance_df.empty:
+                    st.info(f"Available columns in forex_model_performance: {', '.join(performance_df.columns.tolist())}")
+                # Display results
+                if not summary_df.empty:
+                    st.markdown("### 📊 Forex Daily Summary")
+                    
+                    # Summary metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Records", len(summary_df))
+                    with col2:
+                        unique_pairs = summary_df['currency_pair'].nunique() if 'currency_pair' in summary_df.columns else 0
+                        st.metric("Currency Pairs", unique_pairs)
+                    with col3:
+                        if 'daily_return' in summary_df.columns:
+                            avg_return = summary_df['daily_return'].mean()
+                            st.metric("Avg Daily Return", f"{avg_return:.4f}%")
+                    with col4:
+                        if 'volatility' in summary_df.columns:
+                            avg_volatility = summary_df['volatility'].mean()
+                            st.metric("Avg Volatility", f"{avg_volatility:.4f}")
+                    
+                    # Display summary table with enhanced formatting
+                    # Create dynamic column config based on available columns
+                    column_config = {}
+                    if any(col in summary_df.columns for col in ['trading_date', 'date', 'Date', 'TradeDate']):
+                        date_col = next((col for col in ['trading_date', 'date', 'Date', 'TradeDate'] if col in summary_df.columns), None)
+                        if date_col:
+                            column_config[date_col] = st.column_config.DateColumn('📅 Date')
+                    
+                    if 'currency_pair' in summary_df.columns:
+                        column_config['currency_pair'] = st.column_config.TextColumn('💱 Currency Pair')
+                    elif 'CurrencyPair' in summary_df.columns:
+                        column_config['CurrencyPair'] = st.column_config.TextColumn('💱 Currency Pair')
+                    
+                    st.dataframe(
+                        summary_df,
+                        use_container_width=True,
+                        column_config=column_config
+                    )
+                    
+                    # Export summary
+                    csv_summary = summary_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Summary (CSV)",
+                        data=csv_summary,
+                        file_name=f"forex_daily_summary_{start_date}_{end_date}.csv",
+                        mime="text/csv",
+                        key="download_forex_summary"
+                    )
+                else:
+                    st.warning("No forex daily summary data found for the selected criteria.")
+                
+                # ML Predictions Section
+                if not predictions_df.empty:
+                    st.markdown("### 🤖 Forex ML Predictions")
+                    
+                    # Predictions metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Predictions", len(predictions_df))
+                    with col2:
+                        if 'prediction_direction' in predictions_df.columns:
+                            bullish_predictions = len(predictions_df[predictions_df['prediction_direction'].str.contains('UP|BUY|BULL', case=False, na=False)])
+                            st.metric("Bullish Predictions", bullish_predictions)
+                    with col3:
+                        if 'confidence_score' in predictions_df.columns:
+                            avg_confidence = predictions_df['confidence_score'].mean()
+                            st.metric("Avg Confidence", f"{avg_confidence:.2f}%")
+                    with col4:
+                        if 'predicted_return' in predictions_df.columns:
+                            avg_predicted_return = predictions_df['predicted_return'].mean()
+                            st.metric("Avg Predicted Return", f"{avg_predicted_return:.4f}%")
+                    
+                    # Create dynamic column config for predictions
+                    pred_column_config = {}
+                    if any(col in predictions_df.columns for col in ['prediction_date', 'date', 'Date', 'PredictionDate']):
+                        date_col = next((col for col in ['prediction_date', 'date', 'Date', 'PredictionDate'] if col in predictions_df.columns), None)
+                        if date_col:
+                            pred_column_config[date_col] = st.column_config.DateColumn('📅 Date')
+                    
+                    if 'currency_pair' in predictions_df.columns:
+                        pred_column_config['currency_pair'] = st.column_config.TextColumn('💱 Currency Pair')
+                    elif 'CurrencyPair' in predictions_df.columns:
+                        pred_column_config['CurrencyPair'] = st.column_config.TextColumn('💱 Currency Pair')
+                    
+                    st.dataframe(
+                        predictions_df,
+                        use_container_width=True,
+                        column_config=pred_column_config
+                    )
+                    
+                    # Export predictions
+                    csv_predictions = predictions_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Predictions (CSV)",
+                        data=csv_predictions,
+                        file_name=f"forex_ml_predictions_{start_date}_{end_date}.csv",
+                        mime="text/csv",
+                        key="download_forex_predictions"
+                    )
+                else:
+                    st.info("No forex ML predictions data found for the selected criteria.")
+                
+                # Model Performance Section
+                if not performance_df.empty:
+                    st.markdown("### 📈 Model Performance Analysis")
+                    
+                    # Performance metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        if 'accuracy_score' in performance_df.columns:
+                            avg_accuracy = performance_df['accuracy_score'].mean()
+                            st.metric("Avg Accuracy", f"{avg_accuracy:.2f}%")
+                    with col2:
+                        if 'precision_score' in performance_df.columns:
+                            avg_precision = performance_df['precision_score'].mean()
+                            st.metric("Avg Precision", f"{avg_precision:.2f}%")
+                    with col3:
+                        if 'recall_score' in performance_df.columns:
+                            avg_recall = performance_df['recall_score'].mean()
+                            st.metric("Avg Recall", f"{avg_recall:.2f}%")
+                    with col4:
+                        if 'f1_score' in performance_df.columns:
+                            avg_f1 = performance_df['f1_score'].mean()
+                            st.metric("Avg F1 Score", f"{avg_f1:.2f}%")
+                    
+                    # Create dynamic column config for performance
+                    perf_column_config = {}
+                    if any(col in performance_df.columns for col in ['evaluation_date', 'date', 'Date', 'EvaluationDate']):
+                        date_col = next((col for col in ['evaluation_date', 'date', 'Date', 'EvaluationDate'] if col in performance_df.columns), None)
+                        if date_col:
+                            perf_column_config[date_col] = st.column_config.DateColumn('📅 Date')
+                    
+                    if 'currency_pair' in performance_df.columns:
+                        perf_column_config['currency_pair'] = st.column_config.TextColumn('💱 Currency Pair')
+                    elif 'CurrencyPair' in performance_df.columns:
+                        perf_column_config['CurrencyPair'] = st.column_config.TextColumn('💱 Currency Pair')
+                    
+                    st.dataframe(
+                        performance_df,
+                        use_container_width=True,
+                        column_config=perf_column_config
+                    )
+                    
+                    # Export performance
+                    csv_performance = performance_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Performance (CSV)",
+                        data=csv_performance,
+                        file_name=f"forex_model_performance_{start_date}_{end_date}.csv",
+                        mime="text/csv",
+                        key="download_forex_performance"
+                    )
+                else:
+                    st.info("No forex model performance data found for the selected criteria.")
+                
+            except Exception as e:
+                st.error(f"Error loading data: {str(e)}")
+    
+    # Information section
+    with st.expander("ℹ️ About Forex ML Predictions", expanded=False):
+        st.markdown("""
+        **Data Sources:**
+        - `dbo.forex_daily_summary`: Daily market summary and statistics
+        - `dbo.forex_ml_predictions`: ML-powered forex predictions and signals
+        - `dbo.forex_model_performance`: Model accuracy and performance metrics
+        
+        **Features:**
+        - Date range or single date filtering
+        - Currency pair-specific analysis
+        - Comprehensive ML performance metrics
+        - Downloadable reports in CSV format
+        - Real-time forex market insights
+        """)
+
+
 # Main application routing
 if page == "🏠 Home & Filters":
     show_home_page()
@@ -4333,3 +4604,5 @@ elif page == "📊 NASDAQ ML Predictions":
     show_nasdaq_ml_predictions_page()
 elif page == "📈 NSE ML Predictions":
     show_nse_ml_predictions_page()
+elif page == "💱 Forex ML Predictions":
+    show_forex_ml_predictions_page()
