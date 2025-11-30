@@ -4366,52 +4366,91 @@ def show_forex_ml_predictions_page():
     # Currency pair filter
     currency_pair_input = st.text_input(
         "💰 Currency Pair (optional):",
-        placeholder="e.g., EUR/USD, GBP/USD, USD/JPY",
+        placeholder="e.g., EUR/USD, GBP/USD, USD/JPY, EUR, USD",
+        help="Enter full pair (EUR/USD) or partial match (EUR, USD). Uses LIKE search.",
         key="forex_ml_currency_pair"
-    ).upper()
+    ).upper().strip()
     
     # Load data button
     if st.button("💱 Load Forex ML Data", key="load_forex_ml"):
         with st.spinner("Loading Forex ML prediction data..."):
+            # Show filter information
+            if currency_pair_input:
+                st.info(f"🔍 Filtering data for currency pair: **{currency_pair_input}**")
+            else:
+                st.info("📊 Loading all available forex data...")
+            
             try:
                 # Query forex_daily_summary
-                summary_query = f"""
-                SELECT TOP 1000 *
-                FROM dbo.forex_daily_summary
-                """
-                # Add WHERE clause only if we can identify the correct date column
-                # First, let's get the data without date filtering to see the structure
-                summary_query += " ORDER BY 1 DESC"
+                summary_query = "SELECT * FROM dbo.forex_daily_summary ORDER BY 1 DESC"
                 
                 summary_df = execute_query_safe(summary_query)
+                
+                # Apply currency pair filtering after loading data if filter is provided
+                if not summary_df.empty and currency_pair_input:
+                    # Find the currency pair column (check various possible names)
+                    currency_col = None
+                    for col in summary_df.columns:
+                        if any(keyword in col.lower() for keyword in ['currency', 'pair', 'symbol']):
+                            currency_col = col
+                            break
+                    
+                    if currency_col:
+                        # Apply filter using pandas
+                        summary_df = summary_df[summary_df[currency_col].str.contains(currency_pair_input, case=False, na=False)]
+                        st.success(f"✅ Filtered {currency_col} column for: {currency_pair_input}")
+                    else:
+                        st.warning("⚠️ Could not find currency pair column for filtering")
                 
                 # Display column information for debugging
                 if not summary_df.empty:
                     st.info(f"Available columns in forex_daily_summary: {', '.join(summary_df.columns.tolist())}")
                 
                 # Query forex_ml_predictions
-                predictions_query = f"""
-                SELECT TOP 1000 *
-                FROM dbo.forex_ml_predictions
-                """
-                # Add WHERE clause only if we can identify the correct date column
-                predictions_query += " ORDER BY 1 DESC"
+                predictions_query = "SELECT * FROM dbo.forex_ml_predictions ORDER BY 1 DESC"
                 
                 predictions_df = execute_query_safe(predictions_query)
+                
+                # Apply currency pair filtering after loading data if filter is provided
+                if not predictions_df.empty and currency_pair_input:
+                    # Find the currency pair column (check various possible names)
+                    currency_col = None
+                    for col in predictions_df.columns:
+                        if any(keyword in col.lower() for keyword in ['currency', 'pair', 'symbol']):
+                            currency_col = col
+                            break
+                    
+                    if currency_col:
+                        # Apply filter using pandas
+                        predictions_df = predictions_df[predictions_df[currency_col].str.contains(currency_pair_input, case=False, na=False)]
+                        st.success(f"✅ Filtered {currency_col} column for: {currency_pair_input}")
+                    else:
+                        st.warning("⚠️ Could not find currency pair column for filtering")
                 
                 # Display column information for debugging
                 if not predictions_df.empty:
                     st.info(f"Available columns in forex_ml_predictions: {', '.join(predictions_df.columns.tolist())}")
                 
                 # Query forex_model_performance
-                performance_query = f"""
-                SELECT TOP 1000 *
-                FROM dbo.forex_model_performance
-                """
-                # Add WHERE clause only if we can identify the correct date column
-                performance_query += " ORDER BY 1 DESC"
+                performance_query = "SELECT * FROM dbo.forex_model_performance ORDER BY 1 DESC"
                 
                 performance_df = execute_query_safe(performance_query)
+                
+                # Apply currency pair filtering after loading data if filter is provided
+                if not performance_df.empty and currency_pair_input:
+                    # Find the currency pair column (check various possible names)
+                    currency_col = None
+                    for col in performance_df.columns:
+                        if any(keyword in col.lower() for keyword in ['currency', 'pair', 'symbol']):
+                            currency_col = col
+                            break
+                    
+                    if currency_col:
+                        # Apply filter using pandas
+                        performance_df = performance_df[performance_df[currency_col].str.contains(currency_pair_input, case=False, na=False)]
+                        st.success(f"✅ Filtered {currency_col} column for: {currency_pair_input}")
+                    else:
+                        st.warning("⚠️ Could not find currency pair column for filtering")
                 
                 # Display column information for debugging
                 if not performance_df.empty:
