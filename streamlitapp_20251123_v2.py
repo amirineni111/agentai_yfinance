@@ -3891,47 +3891,79 @@ def show_nasdaq_ml_predictions_page():
     ticker_input = st.text_input(
         "🔍 Ticker Symbol (optional):",
         placeholder="e.g., AAPL, MSFT, TSLA",
+        help="Enter ticker symbol for specific stock analysis. Uses partial matching.",
         key="nasdaq_ml_ticker"
-    ).upper()
+    ).upper().strip()
     
     # Load data button
     if st.button("📊 Load NASDAQ ML Data", key="load_nasdaq_ml"):
         with st.spinner("Loading NASDAQ ML prediction data..."):
+            # Show filter information
+            if ticker_input:
+                st.info(f"🔍 Filtering data for ticker: **{ticker_input}**")
+            else:
+                st.info("📊 Loading all available NASDAQ data...")
+            
             try:
                 # Query ml_prediction_summary (this is a summary table, no ticker filtering)
-                summary_query = f"""
-                SELECT TOP 1000 *
-                FROM dbo.ml_prediction_summary
-                WHERE run_date BETWEEN '{start_date}' AND '{end_date}'
-                ORDER BY run_date DESC
-                """
+                summary_query = "SELECT * FROM dbo.ml_prediction_summary ORDER BY 1 DESC"
                 # Note: ml_prediction_summary doesn't have ticker column - it's an aggregate summary
                 
                 summary_df = execute_query_safe(summary_query)
                 
+                # Display column information for debugging
+                if not summary_df.empty:
+                    st.info(f"Available columns in ml_prediction_summary: {', '.join(summary_df.columns.tolist())}")
+                
                 # Query ml_technical_indicators
-                indicators_query = f"""
-                SELECT TOP 1000 *
-                FROM dbo.ml_technical_indicators
-                WHERE trading_date BETWEEN '{start_date}' AND '{end_date}'
-                """
-                if ticker_input:
-                    indicators_query += f" AND ticker = '{ticker_input}'"
-                indicators_query += " ORDER BY trading_date DESC, ticker"
+                indicators_query = "SELECT * FROM dbo.ml_technical_indicators ORDER BY 1 DESC"
                 
                 indicators_df = execute_query_safe(indicators_query)
                 
+                # Apply ticker filtering after loading data if filter is provided
+                if not indicators_df.empty and ticker_input:
+                    # Find the ticker column (check various possible names)
+                    ticker_col = None
+                    for col in indicators_df.columns:
+                        if any(keyword in col.lower() for keyword in ['ticker', 'symbol', 'stock']):
+                            ticker_col = col
+                            break
+                    
+                    if ticker_col:
+                        # Apply filter using pandas
+                        indicators_df = indicators_df[indicators_df[ticker_col].str.contains(ticker_input, case=False, na=False)]
+                        st.success(f"✅ Filtered {ticker_col} column for: {ticker_input}")
+                    else:
+                        st.warning("⚠️ Could not find ticker column for filtering")
+                
+                # Display column information for debugging
+                if not indicators_df.empty:
+                    st.info(f"Available columns in ml_technical_indicators: {', '.join(indicators_df.columns.tolist())}")
+                
                 # Query ml_trading_predictions
-                predictions_query = f"""
-                SELECT TOP 1000 *
-                FROM dbo.ml_trading_predictions
-                WHERE trading_date BETWEEN '{start_date}' AND '{end_date}'
-                """
-                if ticker_input:
-                    predictions_query += f" AND ticker = '{ticker_input}'"
-                predictions_query += " ORDER BY trading_date DESC, ticker"
+                predictions_query = "SELECT * FROM dbo.ml_trading_predictions ORDER BY 1 DESC"
                 
                 predictions_df = execute_query_safe(predictions_query)
+                
+                # Apply ticker filtering after loading data if filter is provided
+                if not predictions_df.empty and ticker_input:
+                    # Find the ticker column (check various possible names)
+                    ticker_col = None
+                    for col in predictions_df.columns:
+                        if any(keyword in col.lower() for keyword in ['ticker', 'symbol', 'stock']):
+                            ticker_col = col
+                            break
+                    
+                    if ticker_col:
+                        # Apply filter using pandas
+                        predictions_df = predictions_df[predictions_df[ticker_col].str.contains(ticker_input, case=False, na=False)]
+                        st.success(f"✅ Filtered {ticker_col} column for: {ticker_input}")
+                    else:
+                        st.warning("⚠️ Could not find ticker column for filtering")
+                
+                # Display column information for debugging
+                if not predictions_df.empty:
+                    st.info(f"Available columns in ml_trading_predictions: {', '.join(predictions_df.columns.tolist())}")
                 
                 # Display results
                 if not summary_df.empty:
@@ -4127,47 +4159,79 @@ def show_nse_ml_predictions_page():
     ticker_input = st.text_input(
         "🔍 Ticker Symbol (optional):",
         placeholder="e.g., RELIANCE, TCS, INFY",
+        help="Enter ticker symbol for specific stock analysis. Uses partial matching.",
         key="nse_ml_ticker"
-    ).upper()
+    ).upper().strip()
     
     # Load data button
     if st.button("📈 Load NSE ML Data", key="load_nse_ml"):
         with st.spinner("Loading NSE ML prediction data..."):
+            # Show filter information
+            if ticker_input:
+                st.info(f"🔍 Filtering data for ticker: **{ticker_input}**")
+            else:
+                st.info("📈 Loading all available NSE data...")
+            
             try:
                 # Query ml_nse_predict_summary (this is a summary table, no ticker filtering)
-                summary_query = f"""
-                SELECT TOP 1000 *
-                FROM dbo.ml_nse_predict_summary
-                WHERE analysis_date BETWEEN '{start_date}' AND '{end_date}'
-                ORDER BY analysis_date DESC
-                """
+                summary_query = "SELECT * FROM dbo.ml_nse_predict_summary ORDER BY 1 DESC"
                 # Note: ml_nse_predict_summary doesn't have ticker column - it's an aggregate summary
                 
                 summary_df = execute_query_safe(summary_query)
                 
+                # Display column information for debugging
+                if not summary_df.empty:
+                    st.info(f"Available columns in ml_nse_predict_summary: {', '.join(summary_df.columns.tolist())}")
+                
                 # Query ml_nse_technical_indicators
-                indicators_query = f"""
-                SELECT TOP 1000 *
-                FROM dbo.ml_nse_technical_indicators
-                WHERE trading_date BETWEEN '{start_date}' AND '{end_date}'
-                """
-                if ticker_input:
-                    indicators_query += f" AND ticker = '{ticker_input}'"
-                indicators_query += " ORDER BY trading_date DESC, ticker"
+                indicators_query = "SELECT * FROM dbo.ml_nse_technical_indicators ORDER BY 1 DESC"
                 
                 indicators_df = execute_query_safe(indicators_query)
                 
+                # Apply ticker filtering after loading data if filter is provided
+                if not indicators_df.empty and ticker_input:
+                    # Find the ticker column (check various possible names)
+                    ticker_col = None
+                    for col in indicators_df.columns:
+                        if any(keyword in col.lower() for keyword in ['ticker', 'symbol', 'stock']):
+                            ticker_col = col
+                            break
+                    
+                    if ticker_col:
+                        # Apply filter using pandas
+                        indicators_df = indicators_df[indicators_df[ticker_col].str.contains(ticker_input, case=False, na=False)]
+                        st.success(f"✅ Filtered {ticker_col} column for: {ticker_input}")
+                    else:
+                        st.warning("⚠️ Could not find ticker column for filtering")
+                
+                # Display column information for debugging
+                if not indicators_df.empty:
+                    st.info(f"Available columns in ml_nse_technical_indicators: {', '.join(indicators_df.columns.tolist())}")
+                
                 # Query ml_nse_trading_predictions
-                predictions_query = f"""
-                SELECT TOP 1000 *
-                FROM dbo.ml_nse_trading_predictions
-                WHERE trading_date BETWEEN '{start_date}' AND '{end_date}'
-                """
-                if ticker_input:
-                    predictions_query += f" AND ticker = '{ticker_input}'"
-                predictions_query += " ORDER BY trading_date DESC, ticker"
+                predictions_query = "SELECT * FROM dbo.ml_nse_trading_predictions ORDER BY 1 DESC"
                 
                 predictions_df = execute_query_safe(predictions_query)
+                
+                # Apply ticker filtering after loading data if filter is provided
+                if not predictions_df.empty and ticker_input:
+                    # Find the ticker column (check various possible names)
+                    ticker_col = None
+                    for col in predictions_df.columns:
+                        if any(keyword in col.lower() for keyword in ['ticker', 'symbol', 'stock']):
+                            ticker_col = col
+                            break
+                    
+                    if ticker_col:
+                        # Apply filter using pandas
+                        predictions_df = predictions_df[predictions_df[ticker_col].str.contains(ticker_input, case=False, na=False)]
+                        st.success(f"✅ Filtered {ticker_col} column for: {ticker_input}")
+                    else:
+                        st.warning("⚠️ Could not find ticker column for filtering")
+                
+                # Display column information for debugging
+                if not predictions_df.empty:
+                    st.info(f"Available columns in ml_nse_trading_predictions: {', '.join(predictions_df.columns.tolist())}")
                 
                 # Display results
                 if not summary_df.empty:
