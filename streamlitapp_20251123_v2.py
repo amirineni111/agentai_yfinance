@@ -134,17 +134,34 @@ def execute_query(query: str, params: list = None) -> pd.DataFrame:
 # ----------------------------
 @st.cache_data
 def get_tickers(index_name: str) -> pd.DataFrame:
-    table = 'nse_500_hist_data' if index_name == 'NSE 500' else 'nasdaq_100_hist_data'
-    q = f"""SELECT DISTINCT ticker
-            FROM dbo.{table}
+    if index_name == 'NSE 500':
+        q = """SELECT DISTINCT ticker 
+            FROM dbo.nse_500_hist_data 
+            WHERE ticker IS NOT NULL
+            ORDER BY ticker"""
+    elif index_name == 'Forex':
+        q = """SELECT DISTINCT symbol as ticker 
+            FROM dbo.forex_hist_data 
+            WHERE symbol IS NOT NULL
+            ORDER BY symbol"""
+    else:
+        q = """SELECT DISTINCT ticker 
+            FROM dbo.nasdaq_100_hist_data 
             WHERE ticker IS NOT NULL
             ORDER BY ticker"""
     return execute_query_safe(q)
-
-
 @st.cache_data
 def load_price_data(index_name: str, ticker: str) -> pd.DataFrame:
-    table = 'nse_500_hist_data' if index_name == 'NSE 500' else 'nasdaq_100_hist_data'
+    if index_name == 'NSE 500':
+        table = 'nse_500_hist_data'
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        table = 'forex_hist_data'
+        ticker_col = 'symbol'
+    else:
+        table = 'nasdaq_100_hist_data'
+        ticker_col = 'ticker'
+        
     q = f"""
         SELECT trading_date,
                CAST(open_price AS FLOAT) AS open_price,
@@ -153,7 +170,7 @@ def load_price_data(index_name: str, ticker: str) -> pd.DataFrame:
                CAST(close_price AS FLOAT) AS close_price,
                CAST(volume AS FLOAT) AS volume
         FROM dbo.{table}
-        WHERE ticker = ?
+        WHERE {ticker_col} = ?
         ORDER BY trading_date
     """
     df = execute_query_safe(q, params=[ticker])
@@ -164,10 +181,19 @@ def load_price_data(index_name: str, ticker: str) -> pd.DataFrame:
 
 @st.cache_data
 def load_rsi(index_name: str, ticker: str) -> pd.DataFrame:
-    view = 'nse_500_RSI_calculation' if index_name == 'NSE 500' else 'nasdaq_100_RSI_calculation'
+    if index_name == 'NSE 500':
+        view = 'nse_500_RSI_calculation'
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        view = 'forex_RSI_calculation'
+        ticker_col = 'symbol'
+    else:
+        view = 'nasdaq_100_RSI_calculation'
+        ticker_col = 'ticker'
+        
     q = f"""SELECT trading_date, RSI
             FROM dbo.{view}
-            WHERE ticker = ?
+            WHERE {ticker_col} = ?
             ORDER BY trading_date"""
     df = execute_query_safe(q, params=[ticker])
     if not df.empty:
@@ -177,10 +203,19 @@ def load_rsi(index_name: str, ticker: str) -> pd.DataFrame:
 
 @st.cache_data
 def load_bbands(index_name: str, ticker: str) -> pd.DataFrame:
-    view = 'nse_500_bollingerband' if index_name == 'NSE 500' else 'nasdaq_100_bollingerband'
+    if index_name == 'NSE 500':
+        view = 'nse_500_bollingerband'
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        view = 'forex_bollingerband'
+        ticker_col = 'symbol'
+    else:
+        view = 'nasdaq_100_bollingerband'
+        ticker_col = 'ticker'
+        
     q = f"""SELECT trading_date, close_price, Upper_Band, Lower_Band
             FROM dbo.{view}
-            WHERE ticker = ?
+            WHERE {ticker_col} = ?
             ORDER BY trading_date"""
     df = execute_query_safe(q, params=[ticker])
     if not df.empty:
@@ -190,10 +225,19 @@ def load_bbands(index_name: str, ticker: str) -> pd.DataFrame:
 
 @st.cache_data
 def load_macd(index_name: str, ticker: str) -> pd.DataFrame:
-    view = 'nse_500_macd' if index_name == 'NSE 500' else 'nasdaq_100_macd'
+    if index_name == 'NSE 500':
+        view = 'nse_500_macd'
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        view = 'forex_macd'
+        ticker_col = 'symbol'
+    else:
+        view = 'nasdaq_100_macd'
+        ticker_col = 'ticker'
+        
     q = f"""SELECT trading_date, MACD, Signal_Line
             FROM dbo.{view}
-            WHERE ticker = ?
+            WHERE {ticker_col} = ?
             ORDER BY trading_date"""
     df = execute_query_safe(q, params=[ticker])
     if not df.empty:
@@ -203,12 +247,21 @@ def load_macd(index_name: str, ticker: str) -> pd.DataFrame:
 
 @st.cache_data
 def load_ema_sma(index_name: str, ticker: str) -> pd.DataFrame:
-    view = 'nse_500_ema_sma_view' if index_name == 'NSE 500' else 'nasdaq_100_ema_sma_view'
+    if index_name == 'NSE 500':
+        view = 'nse_500_ema_sma_view'
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        view = 'forex_ema_sma_view'
+        ticker_col = 'symbol'
+    else:
+        view = 'nasdaq_100_ema_sma_view'
+        ticker_col = 'ticker'
+        
     q = f"""SELECT trading_date, close_price,
                    SMA_50, SMA_100, SMA_200,
                    EMA_50, EMA_100, EMA_200
             FROM dbo.{view}
-            WHERE ticker = ?
+            WHERE {ticker_col} = ?
             ORDER BY trading_date"""
     df = execute_query_safe(q, params=[ticker])
     if not df.empty:
@@ -218,10 +271,19 @@ def load_ema_sma(index_name: str, ticker: str) -> pd.DataFrame:
 
 @st.cache_data
 def load_atr(index_name: str, ticker: str) -> pd.DataFrame:
-    view = 'nse_500_atr' if index_name == 'NSE 500' else 'nasdaq_100_atr'
+    if index_name == 'NSE 500':
+        view = 'nse_500_atr'
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        view = 'forex_atr'
+        ticker_col = 'symbol'
+    else:
+        view = 'nasdaq_100_atr'
+        ticker_col = 'ticker'
+        
     q = f"""SELECT trading_date, ATR_14
             FROM dbo.{view}
-            WHERE ticker = ?
+            WHERE {ticker_col} = ?
             ORDER BY trading_date"""
     df = execute_query_safe(q, params=[ticker])
     if not df.empty:
@@ -249,8 +311,12 @@ def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
     df['cum_volume_price'] = df['volume_price'].cumsum()
     df['cum_volume'] = df['volume'].cumsum()
     
-    # Calculate VWAP
-    df['vwap'] = df['cum_volume_price'] / df['cum_volume']
+    # Calculate VWAP - handle zero volume case
+    df['vwap'] = df['cum_volume_price'] / df['cum_volume'].replace(0, np.nan)
+    
+    # If all volume is zero, use typical price as VWAP fallback
+    if df['cum_volume'].sum() == 0:
+        df['vwap'] = df['typical_price']
     
     # Calculate VWAP bands (standard deviations)
     df['vwap_upper_1'] = df['vwap'] * 1.01  # 1% band
@@ -366,8 +432,12 @@ def calculate_volume_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Calculate volume rate of change
     df['volume_roc'] = df['volume'].pct_change(periods=10) * 100
     
-    # Calculate relative volume
-    df['relative_volume'] = df['volume'] / df['volume_ma_20']
+    # Calculate relative volume - handle zero volume case
+    df['relative_volume'] = df['volume'] / df['volume_ma_20'].replace(0, np.nan)
+    
+    # If all volume is zero, set relative volume to 1 (neutral)
+    if df['volume_ma_20'].sum() == 0:
+        df['relative_volume'] = 1.0
     
     # Calculate all volume indicators
     df = calculate_vwap(df)
@@ -391,6 +461,16 @@ def load_signal_view(index_name: str, view_type: str, ticker: str) -> pd.DataFra
             'SMA': 'nse_500_sma_signals',
             'ATR': 'nse_500_atr_spikes',
         }
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        view_map = {
+            'BB': 'forex_bb_signals',
+            'MACD': 'forex_macd_signals',
+            'RSI': 'forex_rsi_signals',
+            'SMA': 'forex_sma_signals',
+            'ATR': 'forex_atr_spikes',
+        }
+        ticker_col = 'symbol'
     else:
         view_map = {
             'BB': 'nasdaq_100_bb_signals',
@@ -399,11 +479,12 @@ def load_signal_view(index_name: str, view_type: str, ticker: str) -> pd.DataFra
             'SMA': 'nasdaq_100_sma_signals',
             'ATR': 'nasdaq_100_atr_spikes',
         }
+        ticker_col = 'ticker'
 
     view_name = view_map[view_type]
     q = f"""SELECT *
             FROM dbo.{view_name}
-            WHERE ticker = ?
+            WHERE {ticker_col} = ?
             ORDER BY trading_date"""
     df = execute_query_safe(q, params=[ticker])
     if not df.empty:
@@ -2025,6 +2106,15 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
         bb_view = 'nse_500_bollingerband'
         sma_view = 'nse_500_ema_sma_view'
         atr_view = 'nse_500_atr'
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        base_table = 'forex_hist_data'
+        rsi_view = 'forex_RSI_calculation'
+        macd_view = 'forex_macd'
+        bb_view = 'forex_bollingerband'
+        sma_view = 'forex_ema_sma_view'
+        atr_view = 'forex_atr'
+        ticker_col = 'symbol'
     else:  # NASDAQ 100
         base_table = 'nasdaq_100_hist_data'
         rsi_view = 'nasdaq_100_RSI_calculation'
@@ -2032,6 +2122,7 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
         bb_view = 'nasdaq_100_bollingerband' 
         sma_view = 'nasdaq_100_ema_sma_view'
         atr_view = 'nasdaq_100_atr'
+        ticker_col = 'ticker'
     
     limit_clause = f"TOP {limit}" if limit else ""  # No default limit - load all stocks
     
@@ -2041,7 +2132,7 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
     -- Get latest price data for each stock
     LatestPrices AS (
         SELECT 
-            ticker,
+            {ticker_col} as ticker,
             company,
             trading_date,
             CAST(close_price AS FLOAT) AS close_price,
@@ -2051,56 +2142,56 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
             CAST(volume AS FLOAT) AS volume,
             -- Calculate daily change
             ROUND(((CAST(close_price AS FLOAT) - CAST(open_price AS FLOAT)) / CAST(open_price AS FLOAT)) * 100, 2) as daily_change_pct,
-            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+            ROW_NUMBER() OVER (PARTITION BY {ticker_col} ORDER BY trading_date DESC) as rn
         FROM dbo.{base_table}
     ),
     
     -- Latest RSI values
     LatestRSI AS (
         SELECT 
-            ticker,
+            {ticker_col} as ticker,
             RSI,
-            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+            ROW_NUMBER() OVER (PARTITION BY {ticker_col} ORDER BY trading_date DESC) as rn
         FROM dbo.{rsi_view}
     ),
     
     -- Latest MACD values  
     LatestMACD AS (
         SELECT 
-            ticker,
+            {ticker_col} as ticker,
             MACD,
             Signal_Line,
-            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+            ROW_NUMBER() OVER (PARTITION BY {ticker_col} ORDER BY trading_date DESC) as rn
         FROM dbo.{macd_view}
     ),
     
     -- Latest Bollinger Bands
     LatestBB AS (
         SELECT 
-            ticker,
+            {ticker_col} as ticker,
             Upper_Band,
             Lower_Band,
-            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+            ROW_NUMBER() OVER (PARTITION BY {ticker_col} ORDER BY trading_date DESC) as rn
         FROM dbo.{bb_view}
     ),
     
     -- Latest Moving Averages
     LatestSMA AS (
         SELECT 
-            ticker,
+            {ticker_col} as ticker,
             SMA_50,
             SMA_200,
             EMA_50,
-            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+            ROW_NUMBER() OVER (PARTITION BY {ticker_col} ORDER BY trading_date DESC) as rn
         FROM dbo.{sma_view}
     ),
     
     -- Latest ATR
     LatestATR AS (
         SELECT 
-            ticker, 
+            {ticker_col} as ticker, 
             ATR_14,
-            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+            ROW_NUMBER() OVER (PARTITION BY {ticker_col} ORDER BY trading_date DESC) as rn
         FROM dbo.{atr_view}
     )
     
@@ -2353,18 +2444,6 @@ if st.sidebar.button("🔄 Reset Database Connections", help="Click if you're ex
 # ----------------------------
 # PAGE NAVIGATION
 # ----------------------------
-st.title("📊 Advanced Stock Trading Dashboard with AI Analysis")
-
-# ----------------------------
-# SIDEBAR - DATABASE CONNECTION MANAGEMENT  
-# ----------------------------
-st.sidebar.header("🔧 Database Management")
-if st.sidebar.button("🔄 Reset Database Connections", key="reset_db_sidebar", help="Click if you're experiencing database connection issues"):
-    reset_database_connections()
-
-# ----------------------------
-# PAGE NAVIGATION
-# ----------------------------
 st.sidebar.header("📊 Dashboard Controls")
 
 # Page Navigation
@@ -2409,7 +2488,7 @@ def show_home_page():
     
     with col1:
         st.markdown("### 📈 Market Selection")
-        index_option = st.radio("Select Index", ["NSE 500", "NASDAQ 100"], key="home_index")
+        index_option = st.radio("Select Index", ["NSE 500", "NASDAQ 100", "Forex"], key="home_index")
         
         # Store in session state
         st.session_state.index_option = index_option
@@ -2440,8 +2519,21 @@ def show_home_page():
         if ticker_df.empty:
             st.error("❌ No tickers available for this market.")
             return
+        
+        # Show helpful info for Forex market
+        if index_option == "Forex":
+            st.info(f"💱 **Available Forex symbols:** {', '.join(sorted(ticker_df['ticker'].tolist()))}")
+            st.caption("Note: Only symbols listed above have complete historical data for AI analysis.")
             
-        search_ticker = st.text_input("🔎 Search Ticker:", placeholder="e.g., AAPL, RELIANCE", key="home_search").upper()
+        # Dynamic placeholder based on market selection
+        if index_option == "NSE 500":
+            placeholder_text = "e.g., RELIANCE, TCS, INFY"
+        elif index_option == "Forex":
+            placeholder_text = "e.g., EUR/USD, GBP/JPY, USD/CAD"
+        else:  # NASDAQ 100
+            placeholder_text = "e.g., AAPL, MSFT, TSLA"
+            
+        search_ticker = st.text_input("🔎 Search Ticker:", placeholder=placeholder_text, key="home_search").upper()
 
         if search_ticker:
             ticker_df = ticker_df[ticker_df["ticker"].str.contains(search_ticker, case=False, na=False)]
@@ -2455,6 +2547,17 @@ def show_home_page():
         
         # Store in session state
         st.session_state.selected_ticker = selected_ticker
+        
+        # Clear date range session state when ticker changes
+        if 'prev_ticker' not in st.session_state:
+            st.session_state.prev_ticker = selected_ticker
+        elif st.session_state.prev_ticker != selected_ticker:
+            # Ticker changed, clear date range session state
+            if 'date_range' in st.session_state:
+                del st.session_state.date_range
+            if 'price_df' in st.session_state:
+                del st.session_state.price_df
+            st.session_state.prev_ticker = selected_ticker
         
     if selected_ticker:
         st.success(f"📈 Selected: **{selected_ticker}** from **{index_option}**")
@@ -3060,7 +3163,11 @@ def show_ml_prediction_page():
         price_df = load_price_data(index_option, selected_ticker)
         
         if price_df is None or price_df.empty:
-            st.error("No price data available for this stock.")
+            st.error(f"❌ No price data available for **{selected_ticker}** in **{index_option}** market.")
+            if index_option == "Forex":
+                available_symbols = ["AUDUSD", "EURCHF", "EURJPY", "EURUSD", "GBPUSD"]
+                st.info(f"📊 **Available Forex symbols:** {', '.join(available_symbols)}")
+                st.info("💡 **Tip:** Go back to Home page and select one of the available symbols.")
             return
         
         # Calculate volume indicators for features
@@ -3231,6 +3338,16 @@ def show_ml_prediction_page():
         # Forward fill missing values
         feature_df = feature_df.fillna(method='ffill').fillna(method='bfill')
         
+        # Remove any remaining infinite values that might result from zero volume calculations
+        feature_df = feature_df.replace([np.inf, -np.inf], np.nan)
+        
+        # Drop rows with any remaining NaN values after processing
+        initial_rows = len(feature_df)
+        feature_df = feature_df.dropna()
+        
+        if len(feature_df) < initial_rows:
+            st.info(f"ℹ️ Removed {initial_rows - len(feature_df)} rows with invalid values (typically from zero volume calculations)")
+        
         return feature_df, available_features
     
     # Prepare data
@@ -3256,6 +3373,15 @@ def show_ml_prediction_page():
     
     target_df = create_target(feature_df, prediction_days)
     
+    # Validate we have sufficient data after target creation
+    if len(target_df) < 50:
+        st.error(f"❌ Insufficient data for ML training after target creation. Need at least 50 data points, but only have {len(target_df)} points.")
+        if index_option == "Forex":
+            available_symbols = ["AUDUSD", "EURCHF", "EURJPY", "EURUSD", "GBPUSD"]
+            st.info(f"📊 **Available Forex symbols:** {', '.join(available_symbols)}")
+            st.info("💡 **Tip:** Go back to Home page and select one of the available symbols.")
+        return
+    
     # Split data for training and testing
     train_size = int(len(target_df) * 0.8)
     train_df = target_df.iloc[:train_size]
@@ -3266,7 +3392,17 @@ def show_ml_prediction_page():
     y_train = train_df['target'].values
     X_test = test_df[feature_names].values 
     y_test = test_df['target'].values
-      # Enhanced model training with advanced algorithms
+    
+    # Additional validation before scaling
+    if len(X_train) == 0 or len(X_test) == 0:
+        st.error(f"❌ No training or test data available. Training samples: {len(X_train)}, Test samples: {len(X_test)}")
+        if index_option == "Forex":
+            available_symbols = ["AUDUSD", "EURCHF", "EURJPY", "EURUSD", "GBPUSD"]
+            st.info(f"📊 **Available Forex symbols:** {', '.join(available_symbols)}")
+            st.info("💡 **Tip:** Go back to Home page and select one of the available symbols.")
+        return
+    
+    # Enhanced model training with advanced algorithms
     st.markdown("## 🧠 Advanced Model Training & Predictions")
     
     # Create different scalers for different model types
@@ -3744,7 +3880,7 @@ def show_flight_status_page():
     # Index Selection
     index_name = st.selectbox(
         "Select Index",
-        ["NSE 500", "NASDAQ 100"],
+        ["NSE 500", "NASDAQ 100", "Forex"],
         help="Choose which market index to analyze"
     )
     
