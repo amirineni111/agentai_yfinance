@@ -1,1 +1,68 @@
+# GenAI directory
 GenAI/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Testing and debugging files
+test_*.py
+debug_*.py
+check_*.py
+fix_*.py
+validate_*.py
+analyze_*.py
+investigate_*.py
+examine_*.py
+find_*.py
+apply_*.py
+create_working_*.py
+*_test.py
+*_debug.py
+test_*.bat
+
+# Temporary files
+*.tmp
+*.temp
+*_temp.*
+*_bkp.*
+*backup*
+
+# SQL debugging files
+fixed_*.sql
+debug_*.sql
+temp_*.sql
+
+# Log files
+*.log
+logs/
+
+# Environment files
+.env
+.env.local
+
+# IDE files
+.vscode/
+.idea/
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# Database connection files (if any)
+*.db
+*.sqlite
+*.sqlite3
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Streamlit secrets (if any)
+.streamlit/secrets.toml

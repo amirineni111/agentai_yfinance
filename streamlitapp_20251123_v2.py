@@ -291,6 +291,299 @@ def load_atr(index_name: str, ticker: str) -> pd.DataFrame:
     return df
 
 # ----------------------------
+# TREND ANALYSIS FUNCTIONS
+# ----------------------------
+@st.cache_data
+def get_latest_macd_date() -> pd.Timestamp:
+    """Get the latest date with MACD data available"""
+    try:
+        conn = get_db_connection()
+        
+        # Check both NSE and NASDAQ MACD data
+        nse_latest = pd.read_sql("""
+            SELECT MAX(trading_date) as latest_date
+            FROM dbo.nse_500_macd
+        """, conn)
+        
+        nasdaq_latest = pd.read_sql("""
+            SELECT MAX(trading_date) as latest_date
+            FROM dbo.nasdaq_100_macd
+        """, conn)
+        
+        conn.close()
+        
+        # Return the later of the two dates
+        nse_date = nse_latest.iloc[0]['latest_date'] if not nse_latest.empty else None
+        nasdaq_date = nasdaq_latest.iloc[0]['latest_date'] if not nasdaq_latest.empty else None
+        
+        if nse_date and nasdaq_date:
+            return max(nse_date, nasdaq_date)
+        elif nse_date:
+            return nse_date
+        elif nasdaq_date:
+            return nasdaq_date
+        else:
+            return None
+            
+    except Exception as e:
+        st.error(f"Error checking MACD data availability: {e}")
+        return None
+
+@st.cache_data
+def get_trend_analysis_data_range(markets: list, date_range: list) -> pd.DataFrame:
+    """Get trend analysis data for multiple markets and dates"""
+    all_results = []
+    
+    for market in markets:
+        for analysis_date in date_range:
+            try:
+                market_data = get_trend_analysis_data(market, analysis_date)
+                if not market_data.empty:
+                    market_data['market'] = market
+                    market_data['analysis_date'] = analysis_date
+                    all_results.append(market_data)
+            except Exception as e:
+                # Skip dates with no data
+                continue
+    
+    if all_results:
+        combined_df = pd.concat(all_results, ignore_index=True)
+        return combined_df
+    else:
+        return pd.DataFrame()
+
+@st.cache_data
+def get_trend_analysis_data(market: str, analysis_date: str) -> pd.DataFrame:
+    """Get comprehensive trend analysis data for a specific date and market"""
+    if market == 'NSE 500':
+        price_table = 'nse_500_hist_data'
+        rsi_table = 'nse_500_RSI_calculation'
+        macd_table = 'nse_500_macd'
+        sma_table = 'nse_500_ema_sma_view'
+        ticker_col = 'ticker'
+    else:  # NASDAQ 100
+        price_table = 'nasdaq_100_hist_data'
+        rsi_table = 'nasdaq_100_RSI_calculation'
+        macd_table = 'nasdaq_100_macd'
+        sma_table = 'nasdaq_100_ema_sma_view'
+        ticker_col = 'ticker'
+    
+    query = f"""
+    WITH trend_data AS (
+        SELECT 
+            p.{ticker_col},
+            p.trading_date,
+            CAST(p.close_price AS FLOAT) as close_price,
+            CAST(r.RSI AS FLOAT) as RSI,
+            CAST(m.MACD AS FLOAT) as MACD,
+            CAST(m.Signal_Line AS FLOAT) as Signal_Line,
+            CAST(s.SMA_50 AS FLOAT) as SMA_50,
+            -- Strategy flags
+            CASE WHEN CAST(r.RSI AS FLOAT) <= 30 
+                      AND CAST(m.MACD AS FLOAT) > CAST(m.Signal_Line AS FLOAT) 
+                 THEN 1 ELSE 0 END as double_strategy,
+            CASE WHEN CAST(r.RSI AS FLOAT) <= 30 
+                      AND CAST(m.MACD AS FLOAT) > CAST(m.Signal_Line AS FLOAT)
+                      AND CAST(p.close_price AS FLOAT) > CAST(s.SMA_50 AS FLOAT)
+                 THEN 1 ELSE 0 END as triple_strategy
+        FROM dbo.{price_table} p
+        LEFT JOIN dbo.{rsi_table} r ON p.{ticker_col} = r.{ticker_col} AND p.trading_date = r.trading_date
+        LEFT JOIN dbo.{macd_table} m ON p.{ticker_col} = m.{ticker_col} AND p.trading_date = m.trading_date  
+        LEFT JOIN dbo.{sma_table} s ON p.{ticker_col} = s.{ticker_col} AND p.trading_date = s.trading_date
+        WHERE p.trading_date = ?
+            AND r.RSI IS NOT NULL 
+            AND m.MACD IS NOT NULL 
+            AND m.Signal_Line IS NOT NULL
+            AND s.SMA_50 IS NOT NULL
+    )
+    SELECT * FROM trend_data
+    WHERE double_strategy = 1 OR triple_strategy = 1
+    ORDER BY triple_strategy DESC, double_strategy DESC, {ticker_col}
+    """
+    
+    return execute_query_safe(query, params=[analysis_date])
+
+@st.cache_data
+def get_historical_comparison(ticker: str, market: str, current_date: str, previous_date: str, week_back_date: str) -> dict:
+    """Get historical comparison data for a specific ticker across different dates"""
+    if market == 'NSE 500':
+        price_table = 'nse_500_hist_data'
+        rsi_table = 'nse_500_RSI_calculation'
+        macd_table = 'nse_500_macd'
+        sma_table = 'nse_500_ema_sma_view'
+        ticker_col = 'ticker'
+    else:  # NASDAQ 100
+        price_table = 'nasdaq_100_hist_data'
+        rsi_table = 'nasdaq_100_RSI_calculation'
+        macd_table = 'nasdaq_100_macd'
+        sma_table = 'nasdaq_100_ema_sma_view'
+        ticker_col = 'ticker'
+    
+    # Query for all three dates
+    query = f"""
+    SELECT 
+        p.trading_date,
+        CAST(p.close_price AS FLOAT) as close_price,
+        CAST(r.RSI AS FLOAT) as RSI,
+        CAST(m.MACD AS FLOAT) as MACD,
+        CAST(m.Signal_Line AS FLOAT) as Signal_Line,
+        CAST(s.SMA_50 AS FLOAT) as SMA_50,
+        CASE WHEN CAST(r.RSI AS FLOAT) <= 30 
+                  AND CAST(m.MACD AS FLOAT) > CAST(m.Signal_Line AS FLOAT) 
+             THEN 1 ELSE 0 END as double_strategy,
+        CASE WHEN CAST(r.RSI AS FLOAT) <= 30 
+                  AND CAST(m.MACD AS FLOAT) > CAST(m.Signal_Line AS FLOAT)
+                  AND CAST(p.close_price AS FLOAT) > CAST(s.SMA_50 AS FLOAT)
+             THEN 1 ELSE 0 END as triple_strategy
+    FROM dbo.{price_table} p
+    LEFT JOIN dbo.{rsi_table} r ON p.{ticker_col} = r.{ticker_col} AND p.trading_date = r.trading_date
+    LEFT JOIN dbo.{macd_table} m ON p.{ticker_col} = m.{ticker_col} AND p.trading_date = m.trading_date  
+    LEFT JOIN dbo.{sma_table} s ON p.{ticker_col} = s.{ticker_col} AND p.trading_date = s.trading_date
+    WHERE p.{ticker_col} = ? AND p.trading_date IN (?, ?, ?)
+    ORDER BY p.trading_date DESC
+    """
+    
+    df = execute_query_safe(query, params=[ticker, current_date, previous_date, week_back_date])
+    
+    # Organize data by date
+    result = {
+        'current': None,
+        'previous': None,
+        'week_back': None
+    }
+    
+    for _, row in df.iterrows():
+        date_str = row['trading_date'].strftime('%Y-%m-%d') if pd.notna(row['trading_date']) else None
+        if date_str == current_date:
+            result['current'] = row.to_dict()
+        elif date_str == previous_date:
+            result['previous'] = row.to_dict()
+        elif date_str == week_back_date:
+            result['week_back'] = row.to_dict()
+    
+    return result
+
+def get_available_trading_dates(market: str, target_date: str, days_back: int = 10) -> list:
+    """Get list of available trading dates around target date"""
+    if market == 'NSE 500':
+        table = 'nse_500_hist_data'
+    else:
+        table = 'nasdaq_100_hist_data'
+    
+    query = f"""
+    SELECT DISTINCT trading_date
+    FROM dbo.{table}
+    WHERE trading_date <= ? AND trading_date >= DATEADD(day, -{days_back}, ?)
+    ORDER BY trading_date DESC
+    """
+    
+    df = execute_query_safe(query, params=[target_date, target_date])
+    return [date.strftime('%Y-%m-%d') for date in df['trading_date']] if not df.empty else []
+
+# ----------------------------
+# RECOMMENDATION TRACKING FUNCTIONS
+# ----------------------------
+@st.cache_data
+def load_recommendations() -> pd.DataFrame:
+    """Load all recommendation tracking data from master tables"""
+    # Load NSE recommendations
+    nse_query = """
+        SELECT ticker, company_name, monitor_startdate, monitor_enddate, 
+               comments, process_flag, 'NSE 500' as market
+        FROM dbo.NSE_500 
+        WHERE monitor_startdate IS NOT NULL
+    """
+    nse_df = execute_query_safe(nse_query)
+    
+    # Load NASDAQ recommendations
+    nasdaq_query = """
+        SELECT ticker, company_name, monitor_startdate, monitor_enddate, 
+               comments, process_flag, 'NASDAQ 100' as market
+        FROM dbo.NASDAQ_top100 
+        WHERE monitor_startdate IS NOT NULL
+    """
+    nasdaq_df = execute_query_safe(nasdaq_query)
+    
+    # Combine both datasets
+    if not nse_df.empty and not nasdaq_df.empty:
+        combined_df = pd.concat([nse_df, nasdaq_df], ignore_index=True)
+    elif not nse_df.empty:
+        combined_df = nse_df.copy()
+    elif not nasdaq_df.empty:
+        combined_df = nasdaq_df.copy()
+    else:
+        combined_df = pd.DataFrame()
+    
+    if not combined_df.empty:
+        # Convert date columns
+        combined_df['monitor_startdate'] = pd.to_datetime(combined_df['monitor_startdate'])
+        combined_df['monitor_enddate'] = pd.to_datetime(combined_df['monitor_enddate'])
+        
+        # Sort by monitor start date
+        combined_df = combined_df.sort_values('monitor_startdate', ascending=False)
+    
+    return combined_df
+
+def get_price_for_date(ticker: str, target_date: pd.Timestamp, market: str) -> tuple:
+    """Get price for a specific date, or next available date if not found"""
+    if market == 'NSE 500':
+        table = 'nse_500_hist_data'
+        ticker_col = 'ticker'
+    else:  # NASDAQ 100
+        table = 'nasdaq_100_hist_data'
+        ticker_col = 'ticker'
+    
+    # First try to get exact date
+    exact_query = f"""
+        SELECT TOP 1 trading_date, CAST(close_price AS FLOAT) as close_price
+        FROM dbo.{table}
+        WHERE {ticker_col} = ? AND trading_date = ?
+    """
+    
+    exact_df = execute_query_safe(exact_query, params=[ticker, target_date.strftime('%Y-%m-%d')])
+    
+    if not exact_df.empty:
+        return exact_df.iloc[0]['trading_date'], float(exact_df.iloc[0]['close_price'])
+    
+    # If exact date not found, get next available date
+    next_query = f"""
+        SELECT TOP 1 trading_date, CAST(close_price AS FLOAT) as close_price
+        FROM dbo.{table}
+        WHERE {ticker_col} = ? AND trading_date >= ?
+        ORDER BY trading_date ASC
+    """
+    
+    next_df = execute_query_safe(next_query, params=[ticker, target_date.strftime('%Y-%m-%d')])
+    
+    if not next_df.empty:
+        return next_df.iloc[0]['trading_date'], float(next_df.iloc[0]['close_price'])
+    
+    return None, None
+
+def get_current_price(ticker: str, market: str) -> tuple:
+    """Get the most recent available price for a ticker"""
+    if market == 'NSE 500':
+        table = 'nse_500_hist_data'
+        ticker_col = 'ticker'
+    else:  # NASDAQ 100
+        table = 'nasdaq_100_hist_data'
+        ticker_col = 'ticker'
+    
+    query = f"""
+        SELECT TOP 1 trading_date, CAST(close_price AS FLOAT) as close_price
+        FROM dbo.{table}
+        WHERE {ticker_col} = ?
+        ORDER BY trading_date DESC
+    """
+    
+    df = execute_query_safe(query, params=[ticker])
+    
+    if not df.empty:
+        return df.iloc[0]['trading_date'], float(df.iloc[0]['close_price'])
+    
+    return None, None
+
+# ----------------------------
 # VOLUME-BASED INDICATOR CALCULATIONS
 # ----------------------------
 
@@ -2450,7 +2743,7 @@ st.sidebar.header("📊 Dashboard Controls")
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions"],
+    ["🏠 Home & Filters", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations"],
     index=0,
     key="main_page_selector"
 )
@@ -4520,6 +4813,574 @@ def show_nse_ml_predictions_page():
         """)
 
 
+def show_today_trend_recommendations_page():
+    """Show Today Trend Recommendations page with RSI/MACD/SMA strategy analysis"""
+    st.markdown("""
+    # 📈 Today Trend Recommendations
+    
+    ### Advanced Technical Analysis: Double & Triple Strategy Detection
+    
+    Identify high-potential trading opportunities using sophisticated technical indicators:
+    - **Double Strategy**: RSI ≤ 30 + MACD > Signal Line
+    - **Triple Strategy**: Double Strategy + Current Price > SMA 50
+    
+    ---
+    """)
+    
+    # Date selection controls
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        date_range_option = st.selectbox(
+            "📅 Date Selection:",
+            ["Single Date", "Date Range (Last 7 Days)", "Date Range (Last 14 Days)", "Custom Range"],
+            key="date_range_option",
+            help="Choose how to select analysis dates"
+        )
+    
+    # Date inputs based on selection
+    if date_range_option == "Single Date":
+        analysis_date = st.date_input(
+            "📅 Analysis Date:",
+            value=pd.Timestamp.now().date(),
+            key="trend_analysis_date",
+            help="Select single date to analyze"
+        )
+        date_range = [analysis_date.strftime('%Y-%m-%d')]
+    elif date_range_option == "Date Range (Last 7 Days)":
+        end_date = pd.Timestamp.now().date()
+        start_date = (pd.Timestamp.now() - pd.Timedelta(days=7)).date()
+        st.info(f"📅 Analyzing last 7 days: {start_date} to {end_date}")
+        # Generate date range for last 7 days
+        date_range = [(start_date + pd.Timedelta(days=i)).strftime('%Y-%m-%d') 
+                     for i in range((end_date - start_date).days + 1)]
+    elif date_range_option == "Date Range (Last 14 Days)":
+        end_date = pd.Timestamp.now().date()
+        start_date = (pd.Timestamp.now() - pd.Timedelta(days=14)).date()
+        st.info(f"📅 Analyzing last 14 days: {start_date} to {end_date}")
+        # Generate date range for last 14 days
+        date_range = [(start_date + pd.Timedelta(days=i)).strftime('%Y-%m-%d') 
+                     for i in range((end_date - start_date).days + 1)]
+    else:  # Custom Range
+        col_start, col_end = st.columns(2)
+        with col_start:
+            start_date = st.date_input(
+                "Start Date:",
+                value=(pd.Timestamp.now() - pd.Timedelta(days=7)).date(),
+                key="custom_start_date"
+            )
+        with col_end:
+            end_date = st.date_input(
+                "End Date:",
+                value=pd.Timestamp.now().date(),
+                key="custom_end_date"
+            )
+        
+        if start_date <= end_date:
+            date_range = [(start_date + pd.Timedelta(days=i)).strftime('%Y-%m-%d') 
+                         for i in range((end_date - start_date).days + 1)]
+        else:
+            st.error("Start date must be before end date")
+            return
+    
+    with col2:
+        market_selection = st.selectbox(
+            "🏪 Market:",
+            ["All Markets", "NSE 500", "NASDAQ 100"],
+            key="trend_market_selection"
+        )
+    
+    with col3:
+        strategy_filter = st.selectbox(
+            "📊 Strategy Filter:",
+            ["All Strategies", "Triple Strategy Only", "Double Strategy Only"],
+            key="strategy_filter"
+        )
+    
+    # Determine markets to analyze
+    if market_selection == "All Markets":
+        markets_to_analyze = ["NSE 500", "NASDAQ 100"]
+    else:
+        markets_to_analyze = [market_selection]
+    
+    # Display analysis information
+    if len(date_range) == 1:
+        st.info(f"""
+        📊 **Analysis Configuration:**
+        - **Markets**: {', '.join(markets_to_analyze)}
+        - **Date**: {date_range[0]}
+        """)
+    else:
+        st.info(f"""
+        📊 **Analysis Configuration:**
+        - **Markets**: {', '.join(markets_to_analyze)}
+        - **Date Range**: {date_range[0]} to {date_range[-1]} ({len(date_range)} days)
+        """)
+    
+    # Check MACD data availability first
+    with st.spinner("Checking data availability..."):
+        latest_macd_date = get_latest_macd_date()
+        if latest_macd_date:
+            latest_date_str = latest_macd_date.strftime('%Y-%m-%d')
+            if any(pd.Timestamp(date) > latest_macd_date for date in date_range):
+                st.error(f"""
+                ⚠️ **MACD Data Issue Detected**
+                
+                **Last MACD Update:** {latest_date_str}
+                **Your Date Range:** {date_range[0]} to {date_range[-1]}
+                
+                **Problem:** MACD calculations haven't been updated since {latest_date_str}. 
+                Trend analysis requires current MACD data to identify buy signals.
+                
+                **Solutions:**
+                1. Select dates before {latest_date_str} to see historical trends
+                2. Update your MACD calculation process to include recent dates
+                3. Contact your data administrator to refresh MACD calculations
+                """)
+                
+                # Offer to filter dates to available range
+                valid_dates = [date for date in date_range if pd.Timestamp(date) <= latest_macd_date]
+                if valid_dates:
+                    if st.button(f"🔄 Analyze Available Dates Only ({len(valid_dates)} days)"):
+                        date_range = valid_dates
+                        st.rerun()
+                else:
+                    st.stop()
+
+    # Load trend analysis data
+    with st.spinner(f"Analyzing trends across {len(markets_to_analyze)} market(s) and {len(date_range)} date(s)..."):
+        if len(date_range) == 1 and len(markets_to_analyze) == 1:
+            # Single market, single date - use original function
+            trend_df = get_trend_analysis_data(markets_to_analyze[0], date_range[0])
+            if not trend_df.empty:
+                trend_df['market'] = markets_to_analyze[0]
+                trend_df['analysis_date'] = date_range[0]
+        else:
+            # Multiple markets or dates - use range function
+            trend_df = get_trend_analysis_data_range(markets_to_analyze, date_range)
+    
+    if trend_df.empty:
+        st.warning(f"📈 No trend recommendations found for the selected criteria")
+        st.info("""
+        💡 **Possible reasons:**
+        - No stocks meeting the strategy criteria in the selected period
+        - Weekend or holiday periods (no trading data)
+        - Missing technical indicator data
+        
+        **Try:**
+        - Expanding the date range
+        - Checking different market combinations
+        - Using a longer historical period
+        """)
+        return
+    
+    if trend_df.empty:
+        st.warning(f"📈 No trend recommendations found for {analysis_date_str} in {market_selection}")
+        st.info("""
+        💡 **Possible reasons:**
+        - No stocks meeting the strategy criteria on this date
+        - Weekend or holiday (no trading data)
+        - Missing technical indicator data
+        
+        Try selecting a different trading day.
+        """)
+        return
+    
+    # Apply strategy filter
+    if strategy_filter == "Triple Strategy Only":
+        filtered_df = trend_df[trend_df['triple_strategy'] == 1]
+    elif strategy_filter == "Double Strategy Only":
+        filtered_df = trend_df[trend_df['double_strategy'] == 1]
+    else:
+        filtered_df = trend_df.copy()
+    
+    if filtered_df.empty:
+        st.warning(f"No stocks found matching {strategy_filter} criteria")
+        return
+    
+    # Display summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_opportunities = len(filtered_df)
+        st.metric("📊 Total Opportunities", total_opportunities)
+    
+    with col2:
+        triple_count = len(filtered_df[filtered_df['triple_strategy'] == 1])
+        st.metric("🎯 Triple Strategy", triple_count)
+    
+    with col3:
+        double_count = len(filtered_df[filtered_df['double_strategy'] == 1])
+        st.metric("⚡ Double Strategy", double_count)
+    
+    with col4:
+        if 'market' in filtered_df.columns:
+            unique_dates = len(filtered_df['analysis_date'].unique()) if 'analysis_date' in filtered_df.columns else 1
+            unique_markets = len(filtered_df['market'].unique())
+            st.metric("📅 Dates × Markets", f"{unique_dates} × {unique_markets}")
+        else:
+            avg_rsi = filtered_df['RSI'].mean() if not filtered_df.empty else 0
+            st.metric("📉 Avg RSI", f"{avg_rsi:.1f}")
+    
+    # Enhanced analysis with date/market information
+    st.markdown("### 📊 Detailed Trend Analysis Results")
+    
+    # Create enhanced display dataframe
+    display_results = []
+    
+    for _, row in filtered_df.iterrows():
+        result = {
+            'Date': row.get('analysis_date', 'N/A'),
+            'Market': row.get('market', market_selection),
+            'Ticker': row['ticker'],
+            'Strategy': '🎯 Triple' if row['triple_strategy'] == 1 else '⚡ Double',
+            'Price': f"${row['close_price']:.2f}",
+            'RSI': f"{row['RSI']:.1f}",
+            'MACD': f"{row['MACD']:.3f}",
+            'Signal Line': f"{row['Signal_Line']:.3f}",
+            'SMA 50': f"${row['SMA_50']:.2f}",
+            'MACD Signal': '🟢 Bullish' if row['MACD'] > row['Signal_Line'] else '🔴 Bearish',
+            'Price vs SMA': '✅ Above' if row['close_price'] > row['SMA_50'] else '❌ Below'
+        }
+        display_results.append(result)
+    
+    if display_results:
+        results_df = pd.DataFrame(display_results)
+        
+        # Sort by date (newest first) and then by strategy
+        if 'Date' in results_df.columns:
+            results_df = results_df.sort_values(['Date', 'Strategy'], ascending=[False, True])
+        
+        st.dataframe(
+            results_df,
+            use_container_width=True,
+            height=600
+        )
+        
+        # Download functionality
+        csv_data = results_df.to_csv(index=False)
+        filename_suffix = "_".join(markets_to_analyze).replace(" ", "_")
+        if len(date_range) == 1:
+            filename = f"trend_recommendations_{filename_suffix}_{date_range[0]}.csv"
+        else:
+            filename = f"trend_recommendations_{filename_suffix}_{date_range[0]}_to_{date_range[-1]}.csv"
+            
+        st.download_button(
+            label="📥 Download Trend Analysis (CSV)",
+            data=csv_data,
+            file_name=filename,
+            mime="text/csv",
+            key="download_trend_analysis"
+        )
+    
+    # Visualization section
+    st.markdown("### 📊 Analysis Visualizations")
+    
+    if not filtered_df.empty:
+        # Create visualization columns
+        viz_col1, viz_col2 = st.columns(2)
+        
+        with viz_col1:
+            # Strategy distribution chart
+            strategy_counts = {
+                'Triple Strategy': len(filtered_df[filtered_df['triple_strategy'] == 1]),
+                'Double Strategy Only': len(filtered_df[(filtered_df['double_strategy'] == 1) & (filtered_df['triple_strategy'] == 0)])
+            }
+            
+            fig_pie = px.pie(
+                values=list(strategy_counts.values()),
+                names=list(strategy_counts.keys()),
+                title='Strategy Distribution',
+                color_discrete_map={'Triple Strategy': '#2E8B57', 'Double Strategy Only': '#FF6347'}
+            )
+            fig_pie.update_layout(height=400)
+            st.plotly_chart(fig_pie, use_container_width=True)
+        
+        with viz_col2:
+            # Market distribution if multiple markets
+            if 'market' in filtered_df.columns and len(markets_to_analyze) > 1:
+                market_counts = filtered_df['market'].value_counts()
+                fig_market = px.bar(
+                    x=market_counts.index,
+                    y=market_counts.values,
+                    title='Opportunities by Market',
+                    labels={'x': 'Market', 'y': 'Number of Opportunities'}
+                )
+                fig_market.update_layout(height=400)
+                st.plotly_chart(fig_market, use_container_width=True)
+            else:
+                # RSI distribution
+                fig_rsi = px.histogram(
+                    filtered_df,
+                    x='RSI',
+                    nbins=15,
+                    title='RSI Distribution',
+                    labels={'RSI': 'RSI Value', 'count': 'Number of Stocks'}
+                )
+                fig_rsi.add_vline(x=30, line_dash="dash", line_color="red", 
+                                 annotation_text="RSI 30 Threshold")
+                fig_rsi.update_layout(height=400)
+                st.plotly_chart(fig_rsi, use_container_width=True)
+        
+        # Time series if multiple dates
+        if 'analysis_date' in filtered_df.columns and len(date_range) > 1:
+            st.markdown("#### 📅 Opportunities Over Time")
+            
+            # Count opportunities by date
+            daily_counts = filtered_df.groupby('analysis_date').agg({
+                'ticker': 'count',
+                'triple_strategy': 'sum',
+                'double_strategy': 'sum'
+            }).rename(columns={
+                'ticker': 'Total Opportunities',
+                'triple_strategy': 'Triple Strategy',
+                'double_strategy': 'Double Strategy'
+            })
+            
+            fig_timeline = px.line(
+                daily_counts.reset_index(),
+                x='analysis_date',
+                y='Total Opportunities',
+                title='Daily Trend Opportunities',
+                markers=True
+            )
+            fig_timeline.update_layout(height=400)
+            st.plotly_chart(fig_timeline, use_container_width=True)
+    
+    else:
+        st.info("No data available for visualization.")
+
+
+def show_reco_tracking_page():
+    """Show Recommendation Tracking and Current Status page"""
+    st.markdown("""
+    # 📊 Recommendation Tracking and Current Status
+    
+    ### Monitor performance of tracked recommendations from NSE 500 and NASDAQ 100
+    
+    Track the performance of your monitored stocks from recommendation start date to current status.
+    
+    ---
+    """)
+    
+    # Load recommendation data
+    with st.spinner("Loading recommendation tracking data..."):
+        reco_df = load_recommendations()
+    
+    if reco_df.empty:
+        st.warning("📋 No active recommendations found in the master tables.")
+        st.info("""
+        💡 **To add recommendations:**
+        - Add entries to `dbo.NSE_500` or `dbo.NASDAQ_top100` tables
+        - Include `monitor_startdate` and optionally `monitor_enddate`
+        - Set appropriate `comments` and `process_flag` values
+        """)
+        return
+    
+    st.success(f"✅ Found {len(reco_df)} active recommendations")
+    
+    # Filter controls
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        market_filter = st.selectbox(
+            "🏪 Filter by Market:",
+            ["All"] + list(reco_df['market'].unique()),
+            key="reco_market_filter"
+        )
+    
+    with col2:
+        status_filter = st.selectbox(
+            "📊 Filter by Status:",
+            ["All", "Active", "Ended"],
+            key="reco_status_filter"
+        )
+    
+    with col3:
+        sort_by = st.selectbox(
+            "🔄 Sort by:",
+            ["Monitor Start Date", "Company Name", "Performance %"],
+            key="reco_sort_by"
+        )
+    
+    # Apply filters
+    filtered_df = reco_df.copy()
+    
+    if market_filter != "All":
+        filtered_df = filtered_df[filtered_df['market'] == market_filter]
+    
+    if status_filter != "All":
+        current_date = pd.Timestamp.now()
+        if status_filter == "Active":
+            filtered_df = filtered_df[
+                (filtered_df['monitor_enddate'].isna()) | 
+                (filtered_df['monitor_enddate'] >= current_date)
+            ]
+        else:  # Ended
+            filtered_df = filtered_df[
+                (filtered_df['monitor_enddate'].notna()) & 
+                (filtered_df['monitor_enddate'] < current_date)
+            ]
+    
+    if filtered_df.empty:
+        st.warning("No recommendations match the selected filters.")
+        return
+    
+    # Get price data for each recommendation
+    st.markdown("### 📈 Performance Analysis")
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    results = []
+    
+    for idx, row in filtered_df.iterrows():
+        progress = (idx + 1) / len(filtered_df)
+        progress_bar.progress(progress)
+        status_text.text(f"Processing {row['ticker']} ({idx + 1}/{len(filtered_df)})...")
+        
+        # Get start price
+        start_date, start_price = get_price_for_date(
+            row['ticker'], row['monitor_startdate'], row['market']
+        )
+        
+        # Get current price
+        current_date, current_price = get_current_price(row['ticker'], row['market'])
+        
+        # Calculate performance
+        if start_price is not None and current_price is not None:
+            performance_pct = ((current_price - start_price) / start_price) * 100
+            performance_abs = current_price - start_price
+        else:
+            performance_pct = None
+            performance_abs = None
+        
+        # Status determination
+        current_timestamp = pd.Timestamp.now()
+        if pd.isna(row['monitor_enddate']) or row['monitor_enddate'] >= current_timestamp:
+            status = "🟢 Active"
+        else:
+            status = "🔴 Ended"
+        
+        results.append({
+            'Ticker': row['ticker'],
+            'Company': row['company_name'],
+            'Market': row['market'],
+            'Status': status,
+            'Monitor Start': row['monitor_startdate'].strftime('%Y-%m-%d'),
+            'Monitor End': row['monitor_enddate'].strftime('%Y-%m-%d') if pd.notna(row['monitor_enddate']) else 'Ongoing',
+            'Start Date (Actual)': start_date.strftime('%Y-%m-%d') if start_date else 'N/A',
+            'Start Price': f"${start_price:.2f}" if start_price else 'N/A',
+            'Current Date': current_date.strftime('%Y-%m-%d') if current_date else 'N/A',
+            'Current Price': f"${current_price:.2f}" if current_price else 'N/A',
+            'Performance (%)': f"{performance_pct:.2f}%" if performance_pct is not None else 'N/A',
+            'Performance ($)': f"${performance_abs:.2f}" if performance_abs is not None else 'N/A',
+            'Comments': row['comments'] or 'None',
+            '_performance_num': performance_pct  # For sorting
+        })
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    # Convert to DataFrame for display
+    results_df = pd.DataFrame(results)
+    
+    # Apply sorting
+    if sort_by == "Monitor Start Date":
+        results_df = results_df.sort_values('Monitor Start', ascending=False)
+    elif sort_by == "Company Name":
+        results_df = results_df.sort_values('Company')
+    elif sort_by == "Performance %":
+        results_df = results_df.sort_values('_performance_num', ascending=False, na_position='last')
+    
+    # Display summary statistics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_recos = len(results_df)
+        st.metric("📊 Total Recommendations", total_recos)
+    
+    with col2:
+        active_recos = len([r for r in results if "🟢" in r['Status']])
+        st.metric("🟢 Active", active_recos)
+    
+    with col3:
+        valid_performances = [r['_performance_num'] for r in results if r['_performance_num'] is not None]
+        avg_performance = sum(valid_performances) / len(valid_performances) if valid_performances else 0
+        st.metric("📈 Avg Performance", f"{avg_performance:.2f}%")
+    
+    with col4:
+        positive_count = len([p for p in valid_performances if p > 0])
+        win_rate = (positive_count / len(valid_performances) * 100) if valid_performances else 0
+        st.metric("🎯 Win Rate", f"{win_rate:.1f}%")
+    
+    # Display the results table
+    st.markdown("### 📋 Detailed Tracking Results")
+    
+    # Remove the sorting column for display
+    display_df = results_df.drop('_performance_num', axis=1)
+    
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        height=600
+    )
+    
+    # Download button
+    csv_data = display_df.to_csv(index=False)
+    st.download_button(
+        label="📥 Download Tracking Report (CSV)",
+        data=csv_data,
+        file_name=f"recommendation_tracking_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+        key="download_reco_tracking"
+    )
+    
+    # Performance visualization
+    st.markdown("### 📊 Performance Visualization")
+    
+    if valid_performances:
+        # Create performance chart
+        chart_data = []
+        for result in results:
+            if result['_performance_num'] is not None:
+                chart_data.append({
+                    'Ticker': result['Ticker'],
+                    'Performance (%)': result['_performance_num'],
+                    'Market': result['Market'],
+                    'Status': result['Status']
+                })
+        
+        if chart_data:
+            chart_df = pd.DataFrame(chart_data)
+            
+            fig = px.bar(
+                chart_df,
+                x='Ticker',
+                y='Performance (%)',
+                color='Market',
+                title='📈 Recommendation Performance by Ticker',
+                hover_data=['Status'],
+                color_discrete_map={'NSE 500': '#1f77b4', 'NASDAQ 100': '#ff7f0e'}
+            )
+            
+            # Add horizontal line at 0%
+            fig.add_hline(y=0, line_dash="dash", line_color="red", 
+                         annotation_text="Break-even line")
+            
+            fig.update_layout(
+                height=500,
+                xaxis_title="Ticker",
+                yaxis_title="Performance (%)",
+                xaxis={'tickangle': 45}
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+    
+    else:
+        st.info("No performance data available for visualization.")
+
+
 def show_forex_ml_predictions_page():
     """Show Forex ML Predictions page with separate filters"""
     st.title("💱 Forex ML Predictions Dashboard")
@@ -4845,3 +5706,7 @@ elif page == "📈 NSE ML Predictions":
     show_nse_ml_predictions_page()
 elif page == "💱 Forex ML Predictions":
     show_forex_ml_predictions_page()
+elif page == "📊 Reco Tracking and Current Status":
+    show_reco_tracking_page()
+elif page == "📈 Today Trend Recommendations":
+    show_today_trend_recommendations_page()
