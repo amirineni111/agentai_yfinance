@@ -297,7 +297,7 @@ def load_atr(index_name: str, ticker: str) -> pd.DataFrame:
 def get_latest_macd_date() -> pd.Timestamp:
     """Get the latest date with MACD data available"""
     try:
-        conn = get_db_connection()
+        conn = get_connection()
         
         # Check both NSE and NASDAQ MACD data
         nse_latest = pd.read_sql("""
@@ -4922,7 +4922,8 @@ def show_today_trend_recommendations_page():
         latest_macd_date = get_latest_macd_date()
         if latest_macd_date:
             latest_date_str = latest_macd_date.strftime('%Y-%m-%d')
-            if any(pd.Timestamp(date) > latest_macd_date for date in date_range):
+            latest_macd_date_only = latest_macd_date.date() if hasattr(latest_macd_date, 'date') else latest_macd_date
+            if any(pd.Timestamp(date).date() > latest_macd_date_only for date in date_range):
                 st.error(f"""
                 ⚠️ **MACD Data Issue Detected**
                 
@@ -4939,7 +4940,7 @@ def show_today_trend_recommendations_page():
                 """)
                 
                 # Offer to filter dates to available range
-                valid_dates = [date for date in date_range if pd.Timestamp(date) <= latest_macd_date]
+                valid_dates = [date for date in date_range if pd.Timestamp(date).date() <= latest_macd_date_only]
                 if valid_dates:
                     if st.button(f"🔄 Analyze Available Dates Only ({len(valid_dates)} days)"):
                         date_range = valid_dates
