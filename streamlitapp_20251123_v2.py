@@ -4827,6 +4827,15 @@ def show_today_trend_recommendations_page():
     ---
     """)
     
+    # Get the latest available MACD date for smart defaults
+    latest_macd_date = get_latest_macd_date()
+    if latest_macd_date:
+        latest_date = latest_macd_date.date() if hasattr(latest_macd_date, 'date') else latest_macd_date
+        st.info(f"📊 Latest MACD data available: {latest_date}")
+    else:
+        latest_date = pd.Timestamp.now().date()
+        st.warning("⚠️ Could not determine latest MACD date, using today as default")
+    
     # Date selection controls
     col1, col2, col3 = st.columns(3)
     
@@ -4842,22 +4851,22 @@ def show_today_trend_recommendations_page():
     if date_range_option == "Single Date":
         analysis_date = st.date_input(
             "📅 Analysis Date:",
-            value=pd.Timestamp.now().date(),
+            value=latest_date,
             key="trend_analysis_date",
-            help="Select single date to analyze"
+            help="Select single date to analyze (defaulted to latest available MACD data)"
         )
         date_range = [analysis_date.strftime('%Y-%m-%d')]
     elif date_range_option == "Date Range (Last 7 Days)":
-        end_date = pd.Timestamp.now().date()
-        start_date = (pd.Timestamp.now() - pd.Timedelta(days=7)).date()
-        st.info(f"📅 Analyzing last 7 days: {start_date} to {end_date}")
+        end_date = latest_date
+        start_date = (pd.Timestamp(latest_date) - pd.Timedelta(days=6)).date()  # 7 days total including end date
+        st.info(f"📅 Analyzing last 7 days: {start_date} to {end_date} (based on latest MACD data)")
         # Generate date range for last 7 days
         date_range = [(start_date + pd.Timedelta(days=i)).strftime('%Y-%m-%d') 
                      for i in range((end_date - start_date).days + 1)]
     elif date_range_option == "Date Range (Last 14 Days)":
-        end_date = pd.Timestamp.now().date()
-        start_date = (pd.Timestamp.now() - pd.Timedelta(days=14)).date()
-        st.info(f"📅 Analyzing last 14 days: {start_date} to {end_date}")
+        end_date = latest_date
+        start_date = (pd.Timestamp(latest_date) - pd.Timedelta(days=13)).date()  # 14 days total including end date
+        st.info(f"📅 Analyzing last 14 days: {start_date} to {end_date} (based on latest MACD data)")
         # Generate date range for last 14 days
         date_range = [(start_date + pd.Timedelta(days=i)).strftime('%Y-%m-%d') 
                      for i in range((end_date - start_date).days + 1)]
@@ -4866,14 +4875,15 @@ def show_today_trend_recommendations_page():
         with col_start:
             start_date = st.date_input(
                 "Start Date:",
-                value=(pd.Timestamp.now() - pd.Timedelta(days=7)).date(),
+                value=(pd.Timestamp(latest_date) - pd.Timedelta(days=6)).date(),
                 key="custom_start_date"
             )
         with col_end:
             end_date = st.date_input(
                 "End Date:",
-                value=pd.Timestamp.now().date(),
-                key="custom_end_date"
+                value=latest_date,
+                key="custom_end_date",
+                help="Defaulted to latest available MACD data"
             )
         
         if start_date <= end_date:
@@ -4917,26 +4927,20 @@ def show_today_trend_recommendations_page():
         - **Date Range**: {date_range[0]} to {date_range[-1]} ({len(date_range)} days)
         """)
     
-    # Check MACD data availability first
-    with st.spinner("Checking data availability..."):
-        latest_macd_date = get_latest_macd_date()
-        if latest_macd_date:
-            latest_date_str = latest_macd_date.strftime('%Y-%m-%d')
-            latest_macd_date_only = latest_macd_date.date() if hasattr(latest_macd_date, 'date') else latest_macd_date
+    # Check MACD data availability (should rarely trigger now with smart defaults)
+    with st.spinner("Validating data availability..."):
+        latest_macd_date_check = get_latest_macd_date()
+        if latest_macd_date_check:
+            latest_date_str = latest_macd_date_check.strftime('%Y-%m-%d')
+            latest_macd_date_only = latest_macd_date_check.date() if hasattr(latest_macd_date_check, 'date') else latest_macd_date_check
             if any(pd.Timestamp(date).date() > latest_macd_date_only for date in date_range):
-                st.error(f"""
-                ⚠️ **MACD Data Issue Detected**
+                st.warning(f"""
+                📊 **Data Availability Notice**
                 
-                **Last MACD Update:** {latest_date_str}
-                **Your Date Range:** {date_range[0]} to {date_range[-1]}
+                **Latest MACD Data:** {latest_date_str}  
+                **Selected Date Range:** {date_range[0]} to {date_range[-1]}
                 
-                **Problem:** MACD calculations haven't been updated since {latest_date_str}. 
-                Trend analysis requires current MACD data to identify buy signals.
-                
-                **Solutions:**
-                1. Select dates before {latest_date_str} to see historical trends
-                2. Update your MACD calculation process to include recent dates
-                3. Contact your data administrator to refresh MACD calculations
+                Some selected dates are beyond the latest MACD data. You can:
                 """)
                 
                 # Offer to filter dates to available range
@@ -4946,6 +4950,7 @@ def show_today_trend_recommendations_page():
                         date_range = valid_dates
                         st.rerun()
                 else:
+                    st.info("💡 Please select earlier dates with available MACD data.")
                     st.stop()
 
     # Load trend analysis data
