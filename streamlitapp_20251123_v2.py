@@ -394,13 +394,12 @@ def get_trend_analysis_data(market: str, analysis_date: str) -> pd.DataFrame:
     current_data AS (
         SELECT 
             p.{ticker_col},
-            p.trading_date as current_date,
+            p.trading_date as trading_date_current,
             CAST(p.close_price AS FLOAT) as close_price,
             CAST(r.RSI AS FLOAT) as RSI,
             CAST(m.MACD AS FLOAT) as MACD,
             CAST(m.Signal_Line AS FLOAT) as Signal_Line,
             CAST(s.SMA_50 AS FLOAT) as SMA_50,
-            -- Current strategy flags
             CASE WHEN CAST(r.RSI AS FLOAT) <= 30 
                       AND CAST(m.MACD AS FLOAT) > CAST(m.Signal_Line AS FLOAT) 
                  THEN 1 ELSE 0 END as double_strategy,
@@ -6140,11 +6139,11 @@ def show_ai_trading_signals_scanner():
             'Strength': strength,
             'Prev Day': prev_day_signal,
             'Prev Week': prev_week_signal,
-            'Price': f"${row['close_price']:.2f}" if pd.notna(row['close_price']) else 'N/A',
-            'BB Signal': row.get('bb_trade_signal', 'N/A'),
-            'MACD Signal': row.get('macd_signal', 'N/A'),
-            'RSI Signal': row.get('rsi_trade_signal', 'N/A'),
-            'SMA Signal': row.get('sma_trade_signal', 'N/A')
+            'Price': f"${row['close_price']:.2f}" if pd.notna(row.get('close_price')) else 'N/A',
+            'BB Signal': str(row.get('bb_trade_signal', 'N/A')),
+            'MACD Signal': str(row.get('macd_signal', 'N/A')),
+            'RSI Signal': str(row.get('rsi_trade_signal', 'N/A')),
+            'SMA Signal': str(row.get('sma_trade_signal', 'N/A'))
         }
         display_results.append(result)
     
