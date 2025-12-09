@@ -3550,6 +3550,102 @@ This comprehensive technical analysis combines **professional indicators**, **tr
     if show_ai_analysis:
         st.markdown("---")
         st.header("🧠 AI Trading Decision Matrix")
+        
+        # Add explanation of signal types
+        with st.expander("ℹ️ Understanding Different Signal Types - READ THIS FIRST!", expanded=False):
+            st.markdown("""
+            ### 🎯 **Why Do Signals Sometimes Differ?**
+            
+            You might notice that the **Interactive Charts** show different signals than the **AI Trading Decision Matrix**. 
+            This is **INTENTIONAL** and here's why:
+            
+            ---
+            
+            ### 📊 **Two Types of Analysis:**
+            
+            #### 1️⃣ **Interactive Chart Signals (Visual Analysis)**
+            - **What it shows**: Current position of indicators
+            - **MACD Example**: If MACD line is above Signal line → Shows "BULLISH"
+            - **Moving Average Example**: If SMA 50 > SMA 200 → Shows "Golden Cross"
+            - **Use Case**: Understand current market state and trend direction
+            
+            #### 2️⃣ **AI Trading Decision Matrix (Action Signals)**
+            - **What it shows**: Actual trading signals (Buy/Sell/Hold)
+            - **MACD Example**: Only triggers "BUY" when MACD **crosses above** Signal line (not just being above)
+            - **Moving Average Example**: Triggers "BUY" when price **crosses above** moving averages
+            - **Use Case**: Get specific entry/exit timing for trades
+            
+            ---
+            
+            ### 🔍 **Real Example - AUDUSD MACD:**
+            
+            | Indicator View | Shows | What It Means |
+            |---------------|-------|---------------|
+            | **Interactive MACD Chart** | MACD line above Signal line | Current state: "BULLISH position" |
+            | **AI Trading Decision** | SELL or HOLD | No recent crossover = No new entry signal |
+            
+            **Why the difference?**
+            - MACD might have crossed above the signal line **days ago** (chart shows bullish)
+            - But no **recent crossover** means no new trade signal today (AI shows hold/sell)
+            - The trend is bullish, but you missed the entry point!
+            
+            ---
+            
+            ### 📈 **How to Read Both Together:**
+            
+            #### ✅ **Best Trading Scenario:**
+            1. **Chart shows**: MACD crossing above signal line (bullish crossover)
+            2. **AI Decision shows**: BUY signal
+            3. **SMA shows**: Golden Cross (50 > 200)
+            4. **Action**: Strong buy signal with multiple confirmations!
+            
+            #### ⚠️ **Caution Scenario:**
+            1. **Chart shows**: MACD above signal line (bullish)
+            2. **AI Decision shows**: SELL or HOLD
+            3. **Why**: Trend might be bullish, but momentum is weakening or already extended
+            4. **Action**: Wait for pullback or new crossover signal
+            
+            #### 🔴 **Conflicting Signals:**
+            1. **Chart shows**: Golden Cross (long-term bullish)
+            2. **AI Decision shows**: BEARISH BIAS
+            3. **Why**: Short-term momentum indicators (RSI, MACD) showing weakness
+            4. **Action**: Long-term uptrend but short-term correction likely
+            
+            ---
+            
+            ### 🎓 **Key Takeaways:**
+            
+            | Signal Type | Best For | Time Frame |
+            |------------|----------|------------|
+            | **Interactive Charts** | Trend identification | Long-term view |
+            | **AI Trading Decision** | Entry/Exit timing | Short-term action |
+            | **Both Combined** | Complete picture | Best strategy! |
+            
+            ---
+            
+            ### 💡 **Pro Trading Tips:**
+            
+            1. **Use Charts for Context**:
+               - Is the overall trend up or down?
+               - Are we at support/resistance levels?
+               
+            2. **Use AI Signals for Timing**:
+               - When should I enter?
+               - When should I exit?
+               
+            3. **Wait for Alignment**:
+               - Best trades happen when both chart trends AND AI signals agree
+               - If they conflict, wait for clarity or reduce position size
+               
+            4. **Risk Management Always**:
+               - Even with perfect signals, use stop losses
+               - Position size based on volatility (ATR)
+               - Never risk more than 1-2% per trade
+            
+            ---
+            
+            **Remember**: The market doesn't care about your position. Always use multiple confirmations and proper risk management! 🛡️
+            """)
 
         # Create a comprehensive trading decision analysis
         def analyze_trading_signals(bb_df, macd_df, rsi_df, sma_df, atr_df):
@@ -3582,6 +3678,91 @@ This comprehensive technical analysis combines **professional indicators**, **tr
 
         # Analyze current signals
         signal_analysis = analyze_trading_signals(bb_signals_df, macd_signals_df, rsi_signals_df, sma_signals_df, atr_spikes_df)
+        
+        # Add comparison table to show difference between chart view and trading signals
+        st.markdown("### 📊 Signal Comparison: Chart View vs Trading Action")
+        
+        comparison_data = []
+        
+        # MACD Comparison
+        macd_chart_status = "N/A"
+        if not macd_signals_df.empty and 'MACD' in macd_signals_df.columns and 'Signal_Line' in macd_signals_df.columns:
+            latest_macd_val = macd_signals_df['MACD'].iloc[-1]
+            latest_signal_val = macd_signals_df['Signal_Line'].iloc[-1]
+            if pd.notna(latest_macd_val) and pd.notna(latest_signal_val):
+                macd_chart_status = "🟢 BULLISH (MACD > Signal)" if latest_macd_val > latest_signal_val else "🔴 BEARISH (MACD < Signal)"
+        
+        macd_action_signal = signal_analysis.get('macd_signal', 'N/A')
+        comparison_data.append({
+            'Indicator': 'MACD',
+            'Chart View (Trend)': macd_chart_status,
+            'Trading Signal (Action)': f"{'🟢' if 'buy' in str(macd_action_signal).lower() else '🔴' if 'sell' in str(macd_action_signal).lower() else '🟡'} {macd_action_signal}",
+            'Meaning': 'Chart shows current position, Signal shows recent crossover action'
+        })
+        
+        # SMA Comparison
+        sma_chart_status = "N/A"
+        if not sma_signals_df.empty and 'SMA_50' in sma_signals_df.columns and 'SMA_200' in sma_signals_df.columns:
+            latest_sma50 = sma_signals_df['SMA_50'].iloc[-1]
+            latest_sma200 = sma_signals_df['SMA_200'].iloc[-1]
+            if pd.notna(latest_sma50) and pd.notna(latest_sma200):
+                sma_chart_status = "🟢 Golden Cross (50>200)" if latest_sma50 > latest_sma200 else "🔴 Death Cross (50<200)"
+        
+        sma_action_signal = signal_analysis.get('sma_signal', 'N/A')
+        comparison_data.append({
+            'Indicator': 'Moving Average',
+            'Chart View (Trend)': sma_chart_status,
+            'Trading Signal (Action)': f"{'🟢' if 'buy' in str(sma_action_signal).lower() else '🔴' if 'sell' in str(sma_action_signal).lower() else '🟡'} {sma_action_signal}",
+            'Meaning': 'Chart shows long-term trend, Signal shows price crossover timing'
+        })
+        
+        # RSI Comparison
+        rsi_chart_status = "N/A"
+        if not rsi_signals_df.empty and 'RSI' in rsi_signals_df.columns:
+            latest_rsi = rsi_signals_df['RSI'].iloc[-1]
+            if pd.notna(latest_rsi):
+                if latest_rsi > 70:
+                    rsi_chart_status = "🔴 Overbought (>70)"
+                elif latest_rsi < 30:
+                    rsi_chart_status = "🟢 Oversold (<30)"
+                else:
+                    rsi_chart_status = "🟡 Neutral (30-70)"
+        
+        rsi_action_signal = signal_analysis.get('rsi_signal', 'N/A')
+        comparison_data.append({
+            'Indicator': 'RSI',
+            'Chart View (Trend)': rsi_chart_status,
+            'Trading Signal (Action)': f"{'🟢' if 'buy' in str(rsi_action_signal).lower() else '🔴' if 'sell' in str(rsi_action_signal).lower() else '🟡'} {rsi_action_signal}",
+            'Meaning': 'Chart shows overbought/oversold zones, Signal shows momentum shifts'
+        })
+        
+        # Bollinger Bands Comparison
+        bb_chart_status = "N/A"
+        if not bb_signals_df.empty and 'close_price' in bb_signals_df.columns and 'Upper_Band' in bb_signals_df.columns and 'Lower_Band' in bb_signals_df.columns:
+            latest_price = bb_signals_df['close_price'].iloc[-1]
+            latest_upper = bb_signals_df['Upper_Band'].iloc[-1]
+            latest_lower = bb_signals_df['Lower_Band'].iloc[-1]
+            if pd.notna(latest_price) and pd.notna(latest_upper) and pd.notna(latest_lower):
+                if latest_price > latest_upper:
+                    bb_chart_status = "🔴 Above Upper Band"
+                elif latest_price < latest_lower:
+                    bb_chart_status = "🟢 Below Lower Band"
+                else:
+                    bb_chart_status = "🟡 Within Bands"
+        
+        bb_action_signal = signal_analysis.get('bb_signal', 'N/A')
+        comparison_data.append({
+            'Indicator': 'Bollinger Bands',
+            'Chart View (Trend)': bb_chart_status,
+            'Trading Signal (Action)': f"{'🟢' if 'buy' in str(bb_action_signal).lower() else '🔴' if 'sell' in str(bb_action_signal).lower() else '🟡'} {bb_action_signal}",
+            'Meaning': 'Chart shows price position, Signal shows band bounce opportunities'
+        })
+        
+        # Display comparison table
+        comparison_df = pd.DataFrame(comparison_data)
+        st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+        
+        st.info("💡 **Key Insight**: Chart View = Where we are, Trading Signal = What action to take")
 
         col1, col2 = st.columns(2)
 
@@ -3592,15 +3773,33 @@ This comprehensive technical analysis combines **professional indicators**, **tr
             sell_signals = 0
             neutral_signals = 0
             
+            # Categorize signals by type
+            bullish_indicators = []
+            bearish_indicators = []
+            neutral_indicators = []
+            
+            # Map indicator keys to display names
+            indicator_names = {
+                'bb_signal': 'Bollinger Bands',
+                'macd_signal': 'MACD',
+                'rsi_signal': 'RSI',
+                'sma_signal': 'SMA Crossover'
+            }
+            
             for indicator, signal in signal_analysis.items():
+                indicator_display = indicator_names.get(indicator, indicator.replace('_', ' ').title())
+                
                 if signal and isinstance(signal, str):
                     signal_lower = signal.lower()
                     if 'buy' in signal_lower or 'bullish' in signal_lower:
                         buy_signals += 1
+                        bullish_indicators.append(f"✓ {indicator_display}: {signal}")
                     elif 'sell' in signal_lower or 'bearish' in signal_lower:
                         sell_signals += 1
+                        bearish_indicators.append(f"✓ {indicator_display}: {signal}")
                     else:
                         neutral_signals += 1
+                        neutral_indicators.append(f"• {indicator_display}: {signal}")
             
             total_signals = buy_signals + sell_signals + neutral_signals
             
@@ -3611,6 +3810,25 @@ This comprehensive technical analysis combines **professional indicators**, **tr
                 st.metric("🟢 Bullish Signals", f"{buy_signals}/{total_signals}", f"{buy_pct:.1f}%")
                 st.metric("🔴 Bearish Signals", f"{sell_signals}/{total_signals}", f"{sell_pct:.1f}%")
                 st.metric("🟡 Neutral Signals", f"{neutral_signals}/{total_signals}")
+                
+                # Show detailed breakdown
+                st.markdown("---")
+                st.markdown("#### 📋 Signal Details")
+                
+                if bullish_indicators:
+                    st.markdown("**🟢 Bullish Indicators:**")
+                    for indicator in bullish_indicators:
+                        st.markdown(f"- {indicator}")
+                
+                if bearish_indicators:
+                    st.markdown("**🔴 Bearish Indicators:**")
+                    for indicator in bearish_indicators:
+                        st.markdown(f"- {indicator}")
+                
+                if neutral_indicators:
+                    st.markdown("**🟡 Neutral Indicators:**")
+                    for indicator in neutral_indicators:
+                        st.markdown(f"- {indicator}")
 
         with col2:
             st.markdown("### 🎯 Trading Recommendation")
