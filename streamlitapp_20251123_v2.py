@@ -5830,18 +5830,21 @@ def get_ai_trading_signals_data(market: str, analysis_date: str) -> pd.DataFrame
         macd_view = 'nse_500_macd_signals'
         rsi_view = 'nse_500_rsi_signals'
         sma_view = 'nse_500_sma_signals'
+        price_table = 'nse_500_hist_data'
         ticker_col = 'ticker'
     elif market == 'NASDAQ 100':
         bb_view = 'nasdaq_100_bb_signals'
         macd_view = 'nasdaq_100_macd_signals'
         rsi_view = 'nasdaq_100_rsi_signals'
         sma_view = 'nasdaq_100_sma_signals'
+        price_table = 'nasdaq_100_hist_data'
         ticker_col = 'ticker'
     else:  # Forex
         bb_view = 'forex_bb_signals'
         macd_view = 'forex_macd_signals'
         rsi_view = 'forex_rsi_signals'
         sma_view = 'forex_sma_signals'
+        price_table = 'forex_hist_data'
         ticker_col = 'symbol'
     
     query = f"""
@@ -5868,22 +5871,23 @@ def get_ai_trading_signals_data(market: str, analysis_date: str) -> pd.DataFrame
         SELECT 
             m.{ticker_col},
             m.trading_date,
-            m.close_price,
+            p.close_price,
             bb.bb_trade_signal,
             m.MACD_Signal as macd_signal,
             r.rsi_trade_signal,
             s.sma_trade_signal,
             -- Count bullish signals
-            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(m.MACD_Signal) LIKE '%buy%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END) as bullish_count,
+            (CASE WHEN bb.bb_trade_signal IS NOT NULL AND LOWER(bb.bb_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN m.MACD_Signal IS NOT NULL AND LOWER(m.MACD_Signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN r.rsi_trade_signal IS NOT NULL AND LOWER(r.rsi_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN s.sma_trade_signal IS NOT NULL AND LOWER(s.sma_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END) as bullish_count,
             -- Count bearish signals
-            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(m.MACD_Signal) LIKE '%sell%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END) as bearish_count
+            (CASE WHEN bb.bb_trade_signal IS NOT NULL AND LOWER(bb.bb_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN m.MACD_Signal IS NOT NULL AND LOWER(m.MACD_Signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN r.rsi_trade_signal IS NOT NULL AND LOWER(r.rsi_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN s.sma_trade_signal IS NOT NULL AND LOWER(s.sma_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END) as bearish_count
         FROM dbo.{macd_view} m
+        LEFT JOIN dbo.{price_table} p ON m.{ticker_col} = p.{ticker_col} AND m.trading_date = p.trading_date
         LEFT JOIN dbo.{bb_view} bb ON m.{ticker_col} = bb.{ticker_col} AND m.trading_date = bb.trading_date
         LEFT JOIN dbo.{rsi_view} r ON m.{ticker_col} = r.{ticker_col} AND m.trading_date = r.trading_date
         LEFT JOIN dbo.{sma_view} s ON m.{ticker_col} = s.{ticker_col} AND m.trading_date = s.trading_date
@@ -5892,14 +5896,14 @@ def get_ai_trading_signals_data(market: str, analysis_date: str) -> pd.DataFrame
     prev_day_signals AS (
         SELECT 
             m.{ticker_col},
-            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(m.MACD_Signal) LIKE '%buy%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END) as prev_day_bullish,
-            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(m.MACD_Signal) LIKE '%sell%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END) as prev_day_bearish
+            (CASE WHEN bb.bb_trade_signal IS NOT NULL AND LOWER(bb.bb_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN m.MACD_Signal IS NOT NULL AND LOWER(m.MACD_Signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN r.rsi_trade_signal IS NOT NULL AND LOWER(r.rsi_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN s.sma_trade_signal IS NOT NULL AND LOWER(s.sma_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END) as prev_day_bullish,
+            (CASE WHEN bb.bb_trade_signal IS NOT NULL AND LOWER(bb.bb_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN m.MACD_Signal IS NOT NULL AND LOWER(m.MACD_Signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN r.rsi_trade_signal IS NOT NULL AND LOWER(r.rsi_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN s.sma_trade_signal IS NOT NULL AND LOWER(s.sma_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END) as prev_day_bearish
         FROM dbo.{macd_view} m
         LEFT JOIN dbo.{bb_view} bb ON m.{ticker_col} = bb.{ticker_col} AND m.trading_date = bb.trading_date
         LEFT JOIN dbo.{rsi_view} r ON m.{ticker_col} = r.{ticker_col} AND m.trading_date = r.trading_date
@@ -5910,14 +5914,14 @@ def get_ai_trading_signals_data(market: str, analysis_date: str) -> pd.DataFrame
     prev_week_signals AS (
         SELECT 
             m.{ticker_col},
-            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(m.MACD_Signal) LIKE '%buy%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END) as prev_week_bullish,
-            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(m.MACD_Signal) LIKE '%sell%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
-             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END) as prev_week_bearish
+            (CASE WHEN bb.bb_trade_signal IS NOT NULL AND LOWER(bb.bb_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN m.MACD_Signal IS NOT NULL AND LOWER(m.MACD_Signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN r.rsi_trade_signal IS NOT NULL AND LOWER(r.rsi_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN s.sma_trade_signal IS NOT NULL AND LOWER(s.sma_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END) as prev_week_bullish,
+            (CASE WHEN bb.bb_trade_signal IS NOT NULL AND LOWER(bb.bb_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN m.MACD_Signal IS NOT NULL AND LOWER(m.MACD_Signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN r.rsi_trade_signal IS NOT NULL AND LOWER(r.rsi_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN s.sma_trade_signal IS NOT NULL AND LOWER(s.sma_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END) as prev_week_bearish
         FROM dbo.{macd_view} m
         LEFT JOIN dbo.{bb_view} bb ON m.{ticker_col} = bb.{ticker_col} AND m.trading_date = bb.trading_date
         LEFT JOIN dbo.{rsi_view} r ON m.{ticker_col} = r.{ticker_col} AND m.trading_date = r.trading_date
