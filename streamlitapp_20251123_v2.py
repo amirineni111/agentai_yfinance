@@ -7,6 +7,7 @@ from plotly.subplots import make_subplots
 import numpy as np
 from datetime import datetime
 import io
+from io import BytesIO
 import base64
 
 # Configure Streamlit page settings first
@@ -2743,7 +2744,7 @@ st.sidebar.header("📊 Dashboard Controls")
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations"],
+    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations"],
     index=0,
     key="main_page_selector"
 )
@@ -2995,6 +2996,274 @@ def show_home_page():
         st.info("💡 **Tip:** Use the navigation in the sidebar to switch between pages. Your selections will be remembered!")
     else:
         st.info("👆 Please select a market and stock to get started!")
+
+
+def show_data_table_page():
+    """Data in Table format page with historical data from NSE, NASDAQ, and Forex"""
+    st.markdown("""
+    # 📋 Data in Table format
+    
+    ### 📊 Historical Market Data in Tabular View
+    
+    View and analyze historical market data from NSE 500, NASDAQ 100, and Forex markets in a comprehensive table format.
+    
+    ---
+    """)
+    
+    # Market selection
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        market_selection = st.selectbox(
+            "🏪 Select Market:",
+            ["NSE 500", "NASDAQ 100", "Forex"],
+            key="table_market_selection"
+        )
+    
+    with col2:
+        date_range_option = st.selectbox(
+            "📅 Date Range:",
+            ["Last 30 Days", "Last 90 Days", "Last 6 Months", "Last 1 Year", "Custom Range"],
+            key="table_date_range"
+        )
+    
+    with col3:
+        max_records = st.selectbox(
+            "📊 Max Records:",
+            [100, 500, 1000, 2000, 5000],
+            index=2,
+            key="table_max_records"
+        )
+    
+    # Date range selection
+    if date_range_option == "Custom Range":
+        col_start, col_end = st.columns(2)
+        with col_start:
+            start_date = st.date_input(
+                "Start Date:",
+                value=(pd.Timestamp.now() - pd.Timedelta(days=30)).date(),
+                key="table_start_date"
+            )
+        with col_end:
+            end_date = st.date_input(
+                "End Date:",
+                value=pd.Timestamp.now().date(),
+                key="table_end_date"
+            )
+    else:
+        # Calculate date range based on selection
+        end_date = pd.Timestamp.now().date()
+        if date_range_option == "Last 30 Days":
+            start_date = (pd.Timestamp.now() - pd.Timedelta(days=30)).date()
+        elif date_range_option == "Last 90 Days":
+            start_date = (pd.Timestamp.now() - pd.Timedelta(days=90)).date()
+        elif date_range_option == "Last 6 Months":
+            start_date = (pd.Timestamp.now() - pd.Timedelta(days=180)).date()
+        else:  # Last 1 Year
+            start_date = (pd.Timestamp.now() - pd.Timedelta(days=365)).date()
+    
+    # Additional filters
+    st.markdown("### 🔍 Additional Filters")
+    
+    # Symbol/Ticker filter for NSE and NASDAQ
+    if market_selection in ["NSE 500", "NASDAQ 100"]:
+        symbol_filter = st.text_input(
+            "🔍 Filter by Symbol/Ticker (optional):",
+            placeholder="e.g., AAPL, RELIANCE.NS",
+            key="table_symbol_filter"
+        )
+    else:  # Forex
+        symbol_filter = st.text_input(
+            "🔍 Filter by Currency Pair (optional):",
+            placeholder="e.g., EURUSD, GBPUSD",
+            key="table_forex_filter"
+        )
+    
+    # Show/hide columns
+    with st.expander("⚙️ Column Selection", expanded=False):
+        st.markdown("Select which columns to display:")
+        
+        if market_selection in ["NSE 500", "NASDAQ 100"]:
+            default_cols = ["ticker", "trading_date", "open_price", "high_price", "low_price", "close_price", "volume"]
+            available_cols = default_cols + ["data_source", "last_updated", "created_at"]
+        else:  # Forex
+            default_cols = ["symbol", "trading_date", "open_price", "high_price", "low_price", "close_price"]
+            available_cols = default_cols + ["data_source", "last_updated", "created_at"]
+        
+        selected_columns = st.multiselect(
+            "Columns to display:",
+            available_cols,
+            default=default_cols,
+            key="table_selected_columns"
+        )
+    
+    # Load and display data
+    if st.button("📊 Load Data", type="primary"):
+        with st.spinner(f"Loading {market_selection} historical data..."):
+            try:
+                # Determine table name and columns based on market
+                if market_selection == "NSE 500":
+                    table_name = "nse_500_hist_data"
+                    symbol_col = "ticker"
+                elif market_selection == "NASDAQ 100":
+                    table_name = "nasdaq_100_hist_data"
+                    symbol_col = "ticker"
+                else:  # Forex
+                    table_name = "forex_hist_data"
+                    symbol_col = "symbol"
+                
+                # Build query
+                base_query = f"""
+                SELECT TOP {max_records} {', '.join(selected_columns)}
+                FROM dbo.{table_name}
+                WHERE trading_date >= ? AND trading_date <= ?
+                """
+                
+                params = [start_date, end_date]
+                
+                # Add symbol filter if provided
+                if symbol_filter.strip():
+                    if market_selection == "Forex":
+                        base_query += f" AND {symbol_col} LIKE ?"
+                        params.append(f"%{symbol_filter.strip()}%")
+                    else:
+                        base_query += f" AND {symbol_col} LIKE ?"
+                        params.append(f"%{symbol_filter.strip().upper()}%")
+                
+                base_query += " ORDER BY trading_date DESC, " + symbol_col
+                
+                # Execute query
+                df = execute_query_safe(base_query, params)
+                
+                if not df.empty:
+                    # Display summary
+                    st.success(f"📊 Loaded {len(df):,} records from {market_selection}")
+                    
+                    # Summary metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        unique_symbols = df[symbol_col].nunique()
+                        st.metric("🔢 Unique Symbols", unique_symbols)
+                    
+                    with col2:
+                        date_range_days = (df['trading_date'].max() - df['trading_date'].min()).days
+                        st.metric("📅 Date Range", f"{date_range_days} days")
+                    
+                    with col3:
+                        min_date = df['trading_date'].min().strftime('%Y-%m-%d')
+                        st.metric("📅 From Date", min_date)
+                    
+                    with col4:
+                        max_date = df['trading_date'].max().strftime('%Y-%m-%d')
+                        st.metric("📅 To Date", max_date)
+                    
+                    st.markdown("---")
+                    
+                    # Display data table with improved formatting
+                    st.markdown("### 📋 Historical Data Table")
+                    
+                    # Format the dataframe for better display
+                    display_df = df.copy()
+                    
+                    # Format date columns
+                    if 'trading_date' in display_df.columns:
+                        display_df['trading_date'] = pd.to_datetime(display_df['trading_date']).dt.strftime('%Y-%m-%d')
+                    
+                    # Format price columns to 2 decimal places
+                    price_columns = ['open_price', 'high_price', 'low_price', 'close_price']
+                    for col in price_columns:
+                        if col in display_df.columns:
+                            display_df[col] = display_df[col].round(4)
+                    
+                    # Format volume column
+                    if 'volume' in display_df.columns:
+                        display_df['volume'] = display_df['volume'].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else "")
+                    
+                    # Create column configuration for better display
+                    column_config = {}
+                    if 'trading_date' in display_df.columns:
+                        column_config['trading_date'] = st.column_config.DateColumn('📅 Date')
+                    if symbol_col in display_df.columns:
+                        column_config[symbol_col] = st.column_config.TextColumn('🏷️ Symbol')
+                    
+                    for col in price_columns:
+                        if col in display_df.columns:
+                            column_config[col] = st.column_config.NumberColumn(
+                                col.replace('_', ' ').title(),
+                                format="%.4f"
+                            )
+                    
+                    if 'volume' in display_df.columns:
+                        column_config['volume'] = st.column_config.TextColumn('📊 Volume')
+                    
+                    # Display the dataframe
+                    st.dataframe(
+                        display_df,
+                        use_container_width=True,
+                        column_config=column_config,
+                        hide_index=True
+                    )
+                    
+                    # Download options
+                    st.markdown("### 📥 Download Data")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        csv_data = df.to_csv(index=False)
+                        st.download_button(
+                            label="📄 Download as CSV",
+                            data=csv_data,
+                            file_name=f"{market_selection.lower().replace(' ', '_')}_data_{start_date}_{end_date}.csv",
+                            mime="text/csv"
+                        )
+                    
+                    with col2:
+                        excel_buffer = BytesIO()
+                        df.to_excel(excel_buffer, index=False, sheet_name='Historical Data')
+                        excel_data = excel_buffer.getvalue()
+                        
+                        st.download_button(
+                            label="📊 Download as Excel",
+                            data=excel_data,
+                            file_name=f"{market_selection.lower().replace(' ', '_')}_data_{start_date}_{end_date}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    
+                else:
+                    st.warning("No data found for the selected criteria. Try adjusting your filters.")
+                
+            except Exception as e:
+                st.error(f"Error loading data: {str(e)}")
+                st.error("Please check your database connection and table structure.")
+    
+    # Information section
+    with st.expander("ℹ️ About Data Sources", expanded=False):
+        st.markdown(f"""
+        **Current Selection: {market_selection}**
+        
+        **📊 NSE 500:**
+        - Source Table: `dbo.nse_500_hist_data`
+        - Contains: Indian stock market data for NSE 500 companies
+        - Fields: ticker, trading_date, OHLC prices, volume
+        
+        **📈 NASDAQ 100:**
+        - Source Table: `dbo.nasdaq_100_hist_data`
+        - Contains: US stock market data for NASDAQ 100 companies
+        - Fields: ticker, trading_date, OHLC prices, volume
+        
+        **💱 Forex:**
+        - Source Table: `dbo.forex_hist_data`
+        - Contains: Foreign exchange currency pair data
+        - Fields: symbol, trading_date, OHLC prices
+        
+        **🔧 Features:**
+        - Real-time data filtering and sorting
+        - Customizable date ranges and record limits
+        - Symbol/ticker specific filtering
+        - Export to CSV and Excel formats
+        - Responsive table display with professional formatting
+        """)
 
 
 def show_technical_analysis_page():
@@ -5700,6 +5969,8 @@ def show_forex_ml_predictions_page():
 # Main application routing
 if page == "🏠 Home & Filters":
     show_home_page()
+elif page == "📋 Data in Table format":
+    show_data_table_page()
 elif page == "📈 Technical Analysis":
     show_technical_analysis_page()
 elif page == "🤖 AI Price Predictions":
