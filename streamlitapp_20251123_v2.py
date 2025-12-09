@@ -3136,10 +3136,28 @@ def show_data_table_page():
                 df = execute_query_safe(base_query, params)
                 
                 if not df.empty:
+                    # Clean and convert data types
+                    try:
+                        # Ensure trading_date is datetime
+                        df['trading_date'] = pd.to_datetime(df['trading_date'])
+                        
+                        # Convert price columns to numeric, coercing errors to NaN
+                        price_columns = ['open_price', 'high_price', 'low_price', 'close_price']
+                        for col in price_columns:
+                            if col in df.columns:
+                                df[col] = pd.to_numeric(df[col], errors='coerce')
+                        
+                        # Convert volume to numeric if it exists
+                        if 'volume' in df.columns:
+                            df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
+                        
+                    except Exception as e:
+                        st.warning(f"Data type conversion warning: {e}. Proceeding with original data types.")
+                    
                     # Display summary
                     st.success(f"📊 Loaded {len(df):,} records from {market_selection}")
                     
-                    # Summary metrics
+                    # Summary metrics with error handling
                     col1, col2, col3, col4 = st.columns(4)
                     
                     with col1:
@@ -3147,16 +3165,25 @@ def show_data_table_page():
                         st.metric("🔢 Unique Symbols", unique_symbols)
                     
                     with col2:
-                        date_range_days = (df['trading_date'].max() - df['trading_date'].min()).days
-                        st.metric("📅 Date Range", f"{date_range_days} days")
+                        try:
+                            date_range_days = (df['trading_date'].max() - df['trading_date'].min()).days
+                            st.metric("📅 Date Range", f"{date_range_days} days")
+                        except:
+                            st.metric("📅 Date Range", "N/A")
                     
                     with col3:
-                        min_date = df['trading_date'].min().strftime('%Y-%m-%d')
-                        st.metric("📅 From Date", min_date)
+                        try:
+                            min_date = df['trading_date'].min().strftime('%Y-%m-%d')
+                            st.metric("📅 From Date", min_date)
+                        except:
+                            st.metric("📅 From Date", "N/A")
                     
                     with col4:
-                        max_date = df['trading_date'].max().strftime('%Y-%m-%d')
-                        st.metric("📅 To Date", max_date)
+                        try:
+                            max_date = df['trading_date'].max().strftime('%Y-%m-%d')
+                            st.metric("📅 To Date", max_date)
+                        except:
+                            st.metric("📅 To Date", "N/A")
                     
                     st.markdown("---")
                     
@@ -3166,44 +3193,77 @@ def show_data_table_page():
                     # Format the dataframe for better display
                     display_df = df.copy()
                     
-                    # Format date columns
-                    if 'trading_date' in display_df.columns:
-                        display_df['trading_date'] = pd.to_datetime(display_df['trading_date']).dt.strftime('%Y-%m-%d')
-                    
-                    # Format price columns to 2 decimal places
-                    price_columns = ['open_price', 'high_price', 'low_price', 'close_price']
-                    for col in price_columns:
-                        if col in display_df.columns:
-                            display_df[col] = display_df[col].round(4)
-                    
-                    # Format volume column
-                    if 'volume' in display_df.columns:
-                        display_df['volume'] = display_df['volume'].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else "")
+                    try:
+                        # Format date columns safely
+                        if 'trading_date' in display_df.columns:
+                            display_df['trading_date'] = pd.to_datetime(display_df['trading_date']).dt.strftime('%Y-%m-%d')
+                        
+                        # Format price columns safely
+                        for col in price_columns:
+                            if col in display_df.columns:
+                                try:
+                                    # Only round if the column is numeric
+                                    display_df[col] = pd.to_numeric(display_df[col], errors='coerce').round(4)
+                                except:
+                                    # Keep original values if conversion fails
+                                    pass
+                        
+                        # Format volume column safely
+                        if 'volume' in display_df.columns:
+                            try:
+                                # Convert to numeric and format with commas
+                                volume_numeric = pd.to_numeric(display_df['volume'], errors='coerce')
+                                display_df['volume'] = volume_numeric.apply(lambda x: f"{x:,.0f}" if pd.notnull(x) and not pd.isna(x) else "N/A")
+                            except:
+                                # Keep original values if formatting fails
+                                pass
+                        
+                    except Exception as e:
+                        st.warning(f"Data formatting warning: {e}. Displaying with original formatting.")
                     
                     # Create column configuration for better display
                     column_config = {}
-                    if 'trading_date' in display_df.columns:
-                        column_config['trading_date'] = st.column_config.DateColumn('📅 Date')
-                    if symbol_col in display_df.columns:
-                        column_config[symbol_col] = st.column_config.TextColumn('🏷️ Symbol')
                     
-                    for col in price_columns:
-                        if col in display_df.columns:
-                            column_config[col] = st.column_config.NumberColumn(
-                                col.replace('_', ' ').title(),
-                                format="%.4f"
-                            )
+                    try:
+                        if 'trading_date' in display_df.columns:
+                            column_config['trading_date'] = st.column_config.TextColumn('📅 Date')
+                        if symbol_col in display_df.columns:
+                            column_config[symbol_col] = st.column_config.TextColumn('🏷️ Symbol')
+                        
+                        # Only add number columns for successfully converted price data
+                        for col in price_columns:
+                            if col in display_df.columns:
+                                try:
+                                    # Check if the column is numeric after conversion
+                                    if pd.api.types.is_numeric_dtype(display_df[col]):
+                                        column_config[col] = st.column_config.NumberColumn(
+                                            col.replace('_', ' ').title(),
+                                            format="%.4f"
+                                        )
+                                    else:
+                                        column_config[col] = st.column_config.TextColumn(col.replace('_', ' ').title())
+                                except:
+                                    column_config[col] = st.column_config.TextColumn(col.replace('_', ' ').title())
+                        
+                        if 'volume' in display_df.columns:
+                            column_config['volume'] = st.column_config.TextColumn('📊 Volume')
                     
-                    if 'volume' in display_df.columns:
-                        column_config['volume'] = st.column_config.TextColumn('📊 Volume')
+                    except Exception as e:
+                        st.warning(f"Column configuration warning: {e}. Using default formatting.")
+                        column_config = {}
                     
-                    # Display the dataframe
-                    st.dataframe(
-                        display_df,
-                        use_container_width=True,
-                        column_config=column_config,
-                        hide_index=True
-                    )
+                    # Display the dataframe with error handling
+                    try:
+                        st.dataframe(
+                            display_df,
+                            use_container_width=True,
+                            column_config=column_config,
+                            hide_index=True
+                        )
+                    except Exception as e:
+                        st.error(f"Error displaying table: {e}")
+                        st.write("Raw data preview:")
+                        st.write(display_df.head())
                     
                     # Download options
                     st.markdown("### 📥 Download Data")
