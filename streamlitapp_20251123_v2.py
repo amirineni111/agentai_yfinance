@@ -3,6 +3,7 @@ import pyodbc
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 from datetime import datetime
@@ -355,7 +356,7 @@ def get_trend_analysis_data_range(markets: list, date_range: list) -> pd.DataFra
 
 @st.cache_data
 def get_trend_analysis_data(market: str, analysis_date: str) -> pd.DataFrame:
-    """Get comprehensive trend analysis data for a specific date and market"""
+    """Get comprehensive trend analysis data with historical tracking for a specific date and market"""
     if market == 'NSE 500':
         price_table = 'nse_500_hist_data'
         rsi_table = 'nse_500_RSI_calculation'
@@ -369,17 +370,37 @@ def get_trend_analysis_data(market: str, analysis_date: str) -> pd.DataFrame:
         sma_table = 'nasdaq_100_ema_sma_view'
         ticker_col = 'ticker'
     
+    # Get previous trading day and week back dates
     query = f"""
-    WITH trend_data AS (
+    WITH date_context AS (
+        SELECT DISTINCT trading_date
+        FROM dbo.{price_table}
+        WHERE trading_date <= ?
+        ORDER BY trading_date DESC
+        OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY
+    ),
+    prev_day AS (
+        SELECT trading_date as prev_day_date
+        FROM date_context
+        ORDER BY trading_date DESC
+        OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+    ),
+    prev_week AS (
+        SELECT trading_date as prev_week_date
+        FROM date_context
+        ORDER BY trading_date DESC
+        OFFSET 5 ROWS FETCH NEXT 1 ROWS ONLY
+    ),
+    current_data AS (
         SELECT 
             p.{ticker_col},
-            p.trading_date,
+            p.trading_date as current_date,
             CAST(p.close_price AS FLOAT) as close_price,
             CAST(r.RSI AS FLOAT) as RSI,
             CAST(m.MACD AS FLOAT) as MACD,
             CAST(m.Signal_Line AS FLOAT) as Signal_Line,
             CAST(s.SMA_50 AS FLOAT) as SMA_50,
-            -- Strategy flags
+            -- Current strategy flags
             CASE WHEN CAST(r.RSI AS FLOAT) <= 30 
                       AND CAST(m.MACD AS FLOAT) > CAST(m.Signal_Line AS FLOAT) 
                  THEN 1 ELSE 0 END as double_strategy,
@@ -396,13 +417,55 @@ def get_trend_analysis_data(market: str, analysis_date: str) -> pd.DataFrame:
             AND m.MACD IS NOT NULL 
             AND m.Signal_Line IS NOT NULL
             AND s.SMA_50 IS NOT NULL
+    ),
+    prev_day_data AS (
+        SELECT 
+            p.{ticker_col},
+            CASE WHEN CAST(r.RSI AS FLOAT) <= 30 
+                      AND CAST(m.MACD AS FLOAT) > CAST(m.Signal_Line AS FLOAT) 
+                 THEN 1 ELSE 0 END as prev_day_double,
+            CASE WHEN CAST(r.RSI AS FLOAT) <= 30 
+                      AND CAST(m.MACD AS FLOAT) > CAST(m.Signal_Line AS FLOAT)
+                      AND CAST(p.close_price AS FLOAT) > CAST(s.SMA_50 AS FLOAT)
+                 THEN 1 ELSE 0 END as prev_day_triple
+        FROM dbo.{price_table} p
+        LEFT JOIN dbo.{rsi_table} r ON p.{ticker_col} = r.{ticker_col} AND p.trading_date = r.trading_date
+        LEFT JOIN dbo.{macd_table} m ON p.{ticker_col} = m.{ticker_col} AND p.trading_date = m.trading_date  
+        LEFT JOIN dbo.{sma_table} s ON p.{ticker_col} = s.{ticker_col} AND p.trading_date = s.trading_date
+        CROSS JOIN prev_day
+        WHERE p.trading_date = prev_day.prev_day_date
+    ),
+    prev_week_data AS (
+        SELECT 
+            p.{ticker_col},
+            CASE WHEN CAST(r.RSI AS FLOAT) <= 30 
+                      AND CAST(m.MACD AS FLOAT) > CAST(m.Signal_Line AS FLOAT) 
+                 THEN 1 ELSE 0 END as prev_week_double,
+            CASE WHEN CAST(r.RSI AS FLOAT) <= 30 
+                      AND CAST(m.MACD AS FLOAT) > CAST(m.Signal_Line AS FLOAT)
+                      AND CAST(p.close_price AS FLOAT) > CAST(s.SMA_50 AS FLOAT)
+                 THEN 1 ELSE 0 END as prev_week_triple
+        FROM dbo.{price_table} p
+        LEFT JOIN dbo.{rsi_table} r ON p.{ticker_col} = r.{ticker_col} AND p.trading_date = r.trading_date
+        LEFT JOIN dbo.{macd_table} m ON p.{ticker_col} = m.{ticker_col} AND p.trading_date = m.trading_date  
+        LEFT JOIN dbo.{sma_table} s ON p.{ticker_col} = s.{ticker_col} AND p.trading_date = s.trading_date
+        CROSS JOIN prev_week
+        WHERE p.trading_date = prev_week.prev_week_date
     )
-    SELECT * FROM trend_data
-    WHERE double_strategy = 1 OR triple_strategy = 1
-    ORDER BY triple_strategy DESC, double_strategy DESC, {ticker_col}
+    SELECT 
+        c.*,
+        ISNULL(pd.prev_day_double, 0) as prev_day_double,
+        ISNULL(pd.prev_day_triple, 0) as prev_day_triple,
+        ISNULL(pw.prev_week_double, 0) as prev_week_double,
+        ISNULL(pw.prev_week_triple, 0) as prev_week_triple
+    FROM current_data c
+    LEFT JOIN prev_day_data pd ON c.{ticker_col} = pd.{ticker_col}
+    LEFT JOIN prev_week_data pw ON c.{ticker_col} = pw.{ticker_col}
+    WHERE c.double_strategy = 1 OR c.triple_strategy = 1
+    ORDER BY c.triple_strategy DESC, c.double_strategy DESC, c.{ticker_col}
     """
     
-    return execute_query_safe(query, params=[analysis_date])
+    return execute_query_safe(query, params=[analysis_date, analysis_date])
 
 @st.cache_data
 def get_historical_comparison(ticker: str, market: str, current_date: str, previous_date: str, week_back_date: str) -> dict:
@@ -2744,7 +2807,7 @@ st.sidebar.header("📊 Dashboard Controls")
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations"],
+    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🤖 AI Trading Signals Scanner"],
     index=0,
     key="main_page_selector"
 )
@@ -5578,15 +5641,69 @@ def show_today_trend_recommendations_page():
     # Enhanced analysis with date/market information
     st.markdown("### 📊 Detailed Trend Analysis Results")
     
+    # Add explanation
+    st.info("""
+    🔍 **Historical Tracking**: See when strategies changed!
+    - 🆕 **NEW** = Strategy appeared today (wasn't there yesterday)
+    - ⏫ **UPGRADE** = Moved from Double to Triple strategy
+    - ✅ **ACTIVE** = Strategy continuing from previous periods
+    - 🔄 **FLIP** = Strategy status changed from last week
+    """)
+    
     # Create enhanced display dataframe
     display_results = []
     
     for _, row in filtered_df.iterrows():
+        # Determine strategy change status
+        current_strategy = '🎯 Triple' if row['triple_strategy'] == 1 else '⚡ Double'
+        prev_day_had_double = row.get('prev_day_double', 0) == 1
+        prev_day_had_triple = row.get('prev_day_triple', 0) == 1
+        prev_week_had_double = row.get('prev_week_double', 0) == 1
+        prev_week_had_triple = row.get('prev_week_triple', 0) == 1
+        
+        # Determine status
+        if row['triple_strategy'] == 1:
+            if not prev_day_had_triple:
+                if prev_day_had_double:
+                    status = '⏫ UPGRADED'
+                else:
+                    status = '🆕 NEW TRIPLE'
+            elif not prev_week_had_triple:
+                status = '🔄 FLIPPED'
+            else:
+                status = '✅ ACTIVE'
+        else:  # double strategy
+            if not prev_day_had_double:
+                status = '🆕 NEW DOUBLE'
+            elif not prev_week_had_double:
+                status = '🔄 FLIPPED'
+            else:
+                status = '✅ ACTIVE'
+        
+        # Previous day strategy
+        if prev_day_had_triple:
+            prev_day_strategy = '🎯 Triple'
+        elif prev_day_had_double:
+            prev_day_strategy = '⚡ Double'
+        else:
+            prev_day_strategy = '❌ None'
+            
+        # Previous week strategy
+        if prev_week_had_triple:
+            prev_week_strategy = '🎯 Triple'
+        elif prev_week_had_double:
+            prev_week_strategy = '⚡ Double'
+        else:
+            prev_week_strategy = '❌ None'
+        
         result = {
             'Date': row.get('analysis_date', 'N/A'),
             'Market': row.get('market', market_selection),
             'Ticker': row['ticker'],
-            'Strategy': '🎯 Triple' if row['triple_strategy'] == 1 else '⚡ Double',
+            'Status': status,
+            'Current Strategy': current_strategy,
+            'Prev Day': prev_day_strategy,
+            'Prev Week': prev_week_strategy,
             'Price': f"${row['close_price']:.2f}",
             'RSI': f"{row['RSI']:.1f}",
             'MACD': f"{row['MACD']:.3f}",
@@ -5600,9 +5717,11 @@ def show_today_trend_recommendations_page():
     if display_results:
         results_df = pd.DataFrame(display_results)
         
-        # Sort by date (newest first) and then by strategy
-        if 'Date' in results_df.columns:
-            results_df = results_df.sort_values(['Date', 'Strategy'], ascending=[False, True])
+        # Sort by status priority and then by strategy
+        status_priority = {'🆕 NEW TRIPLE': 0, '🆕 NEW DOUBLE': 1, '⏫ UPGRADED': 2, '🔄 FLIPPED': 3, '✅ ACTIVE': 4}
+        results_df['sort_priority'] = results_df['Status'].map(status_priority)
+        results_df = results_df.sort_values(['sort_priority', 'Current Strategy'], ascending=[True, False])
+        results_df = results_df.drop('sort_priority', axis=1)
         
         st.dataframe(
             results_df,
@@ -5702,6 +5821,416 @@ def show_today_trend_recommendations_page():
     
     else:
         st.info("No data available for visualization.")
+
+
+def get_ai_trading_signals_data(market: str, analysis_date: str) -> pd.DataFrame:
+    """Get AI trading signals (crossover-based) for a specific date and market"""
+    if market == 'NSE 500':
+        bb_view = 'nse_500_bb_signals'
+        macd_view = 'nse_500_macd_signals'
+        rsi_view = 'nse_500_rsi_signals'
+        sma_view = 'nse_500_sma_signals'
+        ticker_col = 'ticker'
+    elif market == 'NASDAQ 100':
+        bb_view = 'nasdaq_100_bb_signals'
+        macd_view = 'nasdaq_100_macd_signals'
+        rsi_view = 'nasdaq_100_rsi_signals'
+        sma_view = 'nasdaq_100_sma_signals'
+        ticker_col = 'ticker'
+    else:  # Forex
+        bb_view = 'forex_bb_signals'
+        macd_view = 'forex_macd_signals'
+        rsi_view = 'forex_rsi_signals'
+        sma_view = 'forex_sma_signals'
+        ticker_col = 'symbol'
+    
+    query = f"""
+    WITH date_context AS (
+        SELECT DISTINCT trading_date
+        FROM dbo.{macd_view}
+        WHERE trading_date <= ?
+        ORDER BY trading_date DESC
+        OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY
+    ),
+    prev_day AS (
+        SELECT trading_date as prev_day_date
+        FROM date_context
+        ORDER BY trading_date DESC
+        OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+    ),
+    prev_week AS (
+        SELECT trading_date as prev_week_date
+        FROM date_context
+        ORDER BY trading_date DESC
+        OFFSET 5 ROWS FETCH NEXT 1 ROWS ONLY
+    ),
+    current_signals AS (
+        SELECT 
+            m.{ticker_col},
+            m.trading_date,
+            m.close_price,
+            bb.bb_trade_signal,
+            m.MACD_Signal as macd_signal,
+            r.rsi_trade_signal,
+            s.sma_trade_signal,
+            -- Count bullish signals
+            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(m.MACD_Signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END) as bullish_count,
+            -- Count bearish signals
+            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(m.MACD_Signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END) as bearish_count
+        FROM dbo.{macd_view} m
+        LEFT JOIN dbo.{bb_view} bb ON m.{ticker_col} = bb.{ticker_col} AND m.trading_date = bb.trading_date
+        LEFT JOIN dbo.{rsi_view} r ON m.{ticker_col} = r.{ticker_col} AND m.trading_date = r.trading_date
+        LEFT JOIN dbo.{sma_view} s ON m.{ticker_col} = s.{ticker_col} AND m.trading_date = s.trading_date
+        WHERE m.trading_date = ?
+    ),
+    prev_day_signals AS (
+        SELECT 
+            m.{ticker_col},
+            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(m.MACD_Signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END) as prev_day_bullish,
+            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(m.MACD_Signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END) as prev_day_bearish
+        FROM dbo.{macd_view} m
+        LEFT JOIN dbo.{bb_view} bb ON m.{ticker_col} = bb.{ticker_col} AND m.trading_date = bb.trading_date
+        LEFT JOIN dbo.{rsi_view} r ON m.{ticker_col} = r.{ticker_col} AND m.trading_date = r.trading_date
+        LEFT JOIN dbo.{sma_view} s ON m.{ticker_col} = s.{ticker_col} AND m.trading_date = s.trading_date
+        CROSS JOIN prev_day
+        WHERE m.trading_date = prev_day.prev_day_date
+    ),
+    prev_week_signals AS (
+        SELECT 
+            m.{ticker_col},
+            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(m.MACD_Signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END) as prev_week_bullish,
+            (CASE WHEN LOWER(bb.bb_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(m.MACD_Signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(r.rsi_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END +
+             CASE WHEN LOWER(s.sma_trade_signal) LIKE '%sell%' THEN 1 ELSE 0 END) as prev_week_bearish
+        FROM dbo.{macd_view} m
+        LEFT JOIN dbo.{bb_view} bb ON m.{ticker_col} = bb.{ticker_col} AND m.trading_date = bb.trading_date
+        LEFT JOIN dbo.{rsi_view} r ON m.{ticker_col} = r.{ticker_col} AND m.trading_date = r.trading_date
+        LEFT JOIN dbo.{sma_view} s ON m.{ticker_col} = s.{ticker_col} AND m.trading_date = s.trading_date
+        CROSS JOIN prev_week
+        WHERE m.trading_date = prev_week.prev_week_date
+    )
+    SELECT 
+        c.*,
+        ISNULL(pd.prev_day_bullish, 0) as prev_day_bullish,
+        ISNULL(pd.prev_day_bearish, 0) as prev_day_bearish,
+        ISNULL(pw.prev_week_bullish, 0) as prev_week_bullish,
+        ISNULL(pw.prev_week_bearish, 0) as prev_week_bearish
+    FROM current_signals c
+    LEFT JOIN prev_day_signals pd ON c.{ticker_col} = pd.{ticker_col}
+    LEFT JOIN prev_week_signals pw ON c.{ticker_col} = pw.{ticker_col}
+    WHERE c.bullish_count >= 2 OR c.bearish_count >= 2
+    ORDER BY c.bullish_count DESC, c.bearish_count DESC, c.{ticker_col}
+    """
+    
+    return execute_query_safe(query, params=[analysis_date, analysis_date])
+
+
+def show_ai_trading_signals_scanner():
+    """Show AI Trading Signals Scanner page with crossover-based signal detection"""
+    st.markdown("""
+    # 🤖 AI Trading Signals Scanner
+    
+    ### AI-Powered Crossover Signal Detection
+    
+    Find actionable trading opportunities using AI crossover signals from:
+    - **MACD**: Crossover events (not just position)
+    - **RSI**: Momentum shift signals
+    - **Bollinger Bands**: Band touch/bounce signals
+    - **Moving Averages**: Price crossover signals
+    
+    **Key Difference from Trend Recommendations:**
+    - ✅ **AI Signals** = Based on recent crossovers (timing-focused)
+    - 📊 **Trend Recommendations** = Based on current indicator positions (condition-focused)
+    
+    ---
+    """)
+    
+    # Get the latest available MACD date
+    latest_macd_date = get_latest_macd_date()
+    if latest_macd_date:
+        latest_date = latest_macd_date.date() if hasattr(latest_macd_date, 'date') else latest_macd_date
+        st.info(f"📊 Latest AI signal data available: {latest_date}")
+    else:
+        latest_date = pd.Timestamp.now().date()
+        st.warning("⚠️ Could not determine latest signal date, using today as default")
+    
+    # Controls
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        analysis_date = st.date_input(
+            "📅 Analysis Date:",
+            value=latest_date,
+            key="ai_signal_date",
+            help="Select date to analyze AI trading signals"
+        )
+    
+    with col2:
+        market_selection = st.selectbox(
+            "🏪 Market:",
+            ["NSE 500", "NASDAQ 100", "Forex"],
+            key="ai_signal_market"
+        )
+    
+    with col3:
+        signal_filter = st.selectbox(
+            "📊 Signal Filter:",
+            ["All Signals", "Strong Bullish (3-4 signals)", "Strong Bearish (3-4 signals)", "Moderate Bullish (2 signals)", "Moderate Bearish (2 signals)"],
+            key="ai_signal_filter"
+        )
+    
+    analysis_date_str = analysis_date.strftime('%Y-%m-%d')
+    
+    # Load AI signal data
+    with st.spinner(f"Analyzing AI trading signals for {analysis_date_str}..."):
+        signals_df = get_ai_trading_signals_data(market_selection, analysis_date_str)
+    
+    if signals_df.empty:
+        st.warning(f"📈 No AI trading signals found for {analysis_date_str} in {market_selection}")
+        st.info("""
+        💡 **Possible reasons:**
+        - No fresh crossover signals on this date
+        - Weekend or holiday (no trading data)
+        - Missing signal view data
+        
+        **Try:**
+        - Select a different trading day
+        - Check the Technical Analysis page for individual signals
+        """)
+        return
+    
+    # Apply signal filter
+    if signal_filter == "Strong Bullish (3-4 signals)":
+        filtered_df = signals_df[signals_df['bullish_count'] >= 3]
+    elif signal_filter == "Strong Bearish (3-4 signals)":
+        filtered_df = signals_df[signals_df['bearish_count'] >= 3]
+    elif signal_filter == "Moderate Bullish (2 signals)":
+        filtered_df = signals_df[signals_df['bullish_count'] == 2]
+    elif signal_filter == "Moderate Bearish (2 signals)":
+        filtered_df = signals_df[signals_df['bearish_count'] == 2]
+    else:
+        filtered_df = signals_df.copy()
+    
+    if filtered_df.empty:
+        st.warning(f"No signals found matching {signal_filter} criteria")
+        return
+    
+    # Display summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_signals = len(filtered_df)
+        st.metric("📊 Total Signals", total_signals)
+    
+    with col2:
+        strong_bullish = len(filtered_df[filtered_df['bullish_count'] >= 3])
+        st.metric("🟢 Strong Bullish", strong_bullish)
+    
+    with col3:
+        strong_bearish = len(filtered_df[filtered_df['bearish_count'] >= 3])
+        st.metric("🔴 Strong Bearish", strong_bearish)
+    
+    with col4:
+        moderate_signals = len(filtered_df[(filtered_df['bullish_count'] == 2) | (filtered_df['bearish_count'] == 2)])
+        st.metric("🟡 Moderate Signals", moderate_signals)
+    
+    # Detailed results
+    st.markdown("### 📊 AI Trading Signal Details")
+    
+    st.info("""
+    🔍 **Signal Strength Tracking**:
+    - 🆕 **NEW** = Signal appeared today (wasn't there yesterday)
+    - ⏫ **STRONGER** = More indicators aligned than yesterday
+    - ⏬ **WEAKER** = Fewer indicators aligned than yesterday
+    - ✅ **ACTIVE** = Signal continuing with same strength
+    - 🔄 **FLIP** = Signal direction changed from last week
+    """)
+    
+    # Create enhanced display dataframe
+    display_results = []
+    
+    for _, row in filtered_df.iterrows():
+        ticker_col = 'ticker' if market_selection != 'Forex' else 'symbol'
+        
+        # Determine signal strength and status
+        current_bullish = row['bullish_count']
+        current_bearish = row['bearish_count']
+        prev_day_bullish = row.get('prev_day_bullish', 0)
+        prev_day_bearish = row.get('prev_day_bearish', 0)
+        prev_week_bullish = row.get('prev_week_bullish', 0)
+        prev_week_bearish = row.get('prev_week_bearish', 0)
+        
+        # Determine primary signal
+        if current_bullish > current_bearish:
+            signal_type = f"🟢 BULLISH ({current_bullish}/4)"
+            strength = "💪 Strong" if current_bullish >= 3 else "⚡ Moderate"
+        elif current_bearish > current_bullish:
+            signal_type = f"🔴 BEARISH ({current_bearish}/4)"
+            strength = "💪 Strong" if current_bearish >= 3 else "⚡ Moderate"
+        else:
+            signal_type = f"🟡 MIXED ({current_bullish}-{current_bearish})"
+            strength = "⚖️ Neutral"
+        
+        # Determine status change
+        if current_bullish >= 2 and prev_day_bullish < 2:
+            status = "🆕 NEW BULLISH"
+        elif current_bearish >= 2 and prev_day_bearish < 2:
+            status = "🆕 NEW BEARISH"
+        elif current_bullish > prev_day_bullish and prev_day_bullish >= 2:
+            status = "⏫ STRONGER"
+        elif current_bullish < prev_day_bullish and current_bullish >= 2:
+            status = "⏬ WEAKER"
+        elif current_bearish > prev_day_bearish and prev_day_bearish >= 2:
+            status = "⏫ STRONGER"
+        elif current_bearish < prev_day_bearish and current_bearish >= 2:
+            status = "⏬ WEAKER"
+        elif (current_bullish >= 2 and prev_week_bearish >= 2) or (current_bearish >= 2 and prev_week_bullish >= 2):
+            status = "🔄 FLIPPED"
+        else:
+            status = "✅ ACTIVE"
+        
+        # Previous day signal
+        if prev_day_bullish >= 3:
+            prev_day_signal = f"🟢 Strong ({prev_day_bullish}/4)"
+        elif prev_day_bullish == 2:
+            prev_day_signal = f"🟢 Moderate ({prev_day_bullish}/4)"
+        elif prev_day_bearish >= 3:
+            prev_day_signal = f"🔴 Strong ({prev_day_bearish}/4)"
+        elif prev_day_bearish == 2:
+            prev_day_signal = f"🔴 Moderate ({prev_day_bearish}/4)"
+        else:
+            prev_day_signal = "❌ None"
+        
+        # Previous week signal
+        if prev_week_bullish >= 3:
+            prev_week_signal = f"🟢 Strong ({prev_week_bullish}/4)"
+        elif prev_week_bullish == 2:
+            prev_week_signal = f"🟢 Moderate ({prev_week_bullish}/4)"
+        elif prev_week_bearish >= 3:
+            prev_week_signal = f"🔴 Strong ({prev_week_bearish}/4)"
+        elif prev_week_bearish == 2:
+            prev_week_signal = f"🔴 Moderate ({prev_week_bearish}/4)"
+        else:
+            prev_week_signal = "❌ None"
+        
+        result = {
+            'Ticker': row[ticker_col],
+            'Status': status,
+            'Signal': signal_type,
+            'Strength': strength,
+            'Prev Day': prev_day_signal,
+            'Prev Week': prev_week_signal,
+            'Price': f"${row['close_price']:.2f}" if pd.notna(row['close_price']) else 'N/A',
+            'BB Signal': row.get('bb_trade_signal', 'N/A'),
+            'MACD Signal': row.get('macd_signal', 'N/A'),
+            'RSI Signal': row.get('rsi_trade_signal', 'N/A'),
+            'SMA Signal': row.get('sma_trade_signal', 'N/A')
+        }
+        display_results.append(result)
+    
+    if display_results:
+        results_df = pd.DataFrame(display_results)
+        
+        # Sort by status priority
+        status_priority = {
+            '🆕 NEW BULLISH': 0, '🆕 NEW BEARISH': 1, '⏫ STRONGER': 2, 
+            '🔄 FLIPPED': 3, '✅ ACTIVE': 4, '⏬ WEAKER': 5
+        }
+        results_df['sort_priority'] = results_df['Status'].map(status_priority)
+        results_df = results_df.sort_values('sort_priority')
+        results_df = results_df.drop('sort_priority', axis=1)
+        
+        st.dataframe(
+            results_df,
+            use_container_width=True,
+            height=600
+        )
+        
+        # Download functionality
+        csv_data = results_df.to_csv(index=False)
+        filename = f"ai_trading_signals_{market_selection.replace(' ', '_')}_{analysis_date_str}.csv"
+        
+        st.download_button(
+            label="📥 Download AI Signals (CSV)",
+            data=csv_data,
+            file_name=filename,
+            mime="text/csv",
+            key="download_ai_signals"
+        )
+    
+    # Visualization
+    st.markdown("### 📊 Signal Strength Distribution")
+    
+    if not filtered_df.empty:
+        viz_col1, viz_col2 = st.columns(2)
+        
+        with viz_col1:
+            # Bullish vs Bearish distribution
+            signal_dist = {
+                'Strong Bullish (3-4)': len(filtered_df[filtered_df['bullish_count'] >= 3]),
+                'Moderate Bullish (2)': len(filtered_df[filtered_df['bullish_count'] == 2]),
+                'Moderate Bearish (2)': len(filtered_df[filtered_df['bearish_count'] == 2]),
+                'Strong Bearish (3-4)': len(filtered_df[filtered_df['bearish_count'] >= 3])
+            }
+            
+            fig_dist = px.bar(
+                x=list(signal_dist.keys()),
+                y=list(signal_dist.values()),
+                title='Signal Strength Distribution',
+                labels={'x': 'Signal Type', 'y': 'Count'},
+                color=list(signal_dist.keys()),
+                color_discrete_map={
+                    'Strong Bullish (3-4)': '#00A86B',
+                    'Moderate Bullish (2)': '#90EE90',
+                    'Moderate Bearish (2)': '#FFB6C1',
+                    'Strong Bearish (3-4)': '#DC143C'
+                }
+            )
+            fig_dist.update_layout(height=400, showlegend=False)
+            st.plotly_chart(fig_dist, use_container_width=True)
+        
+        with viz_col2:
+            # Signal count distribution
+            bullish_counts = filtered_df['bullish_count'].value_counts().sort_index()
+            bearish_counts = filtered_df['bearish_count'].value_counts().sort_index()
+            
+            fig_counts = go.Figure()
+            fig_counts.add_trace(go.Bar(
+                x=bullish_counts.index,
+                y=bullish_counts.values,
+                name='Bullish Signals',
+                marker_color='green'
+            ))
+            fig_counts.add_trace(go.Bar(
+                x=bearish_counts.index,
+                y=bearish_counts.values,
+                name='Bearish Signals',
+                marker_color='red'
+            ))
+            fig_counts.update_layout(
+                title='Number of Aligned Indicators',
+                xaxis_title='Signal Count',
+                yaxis_title='Number of Stocks',
+                barmode='group',
+                height=400
+            )
+            st.plotly_chart(fig_counts, use_container_width=True)
 
 
 def show_reco_tracking_page():
@@ -6265,3 +6794,7 @@ elif page == "📊 Reco Tracking and Current Status":
     show_reco_tracking_page()
 elif page == "📈 Today Trend Recommendations":
     show_today_trend_recommendations_page()
+
+elif page == "🤖 AI Trading Signals Scanner":
+    show_ai_trading_signals_scanner()
+
