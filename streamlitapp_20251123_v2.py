@@ -6132,6 +6132,16 @@ def show_ai_trading_signals_scanner():
         else:
             prev_week_signal = "❌ None"
         
+        # Get price value safely
+        price_val = row.get('close_price')
+        if pd.notna(price_val) and price_val is not None:
+            try:
+                price_display = f"${float(price_val):.2f}"
+            except (ValueError, TypeError):
+                price_display = 'N/A'
+        else:
+            price_display = 'N/A'
+        
         result = {
             'Ticker': row[ticker_col],
             'Status': status,
@@ -6139,7 +6149,7 @@ def show_ai_trading_signals_scanner():
             'Strength': strength,
             'Prev Day': prev_day_signal,
             'Prev Week': prev_week_signal,
-            'Price': f"${row['close_price']:.2f}" if pd.notna(row.get('close_price')) else 'N/A',
+            'Price': price_display,
             'BB Signal': str(row.get('bb_trade_signal', 'N/A')),
             'MACD Signal': str(row.get('macd_signal', 'N/A')),
             'RSI Signal': str(row.get('rsi_trade_signal', 'N/A')),
