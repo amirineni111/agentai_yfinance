@@ -2806,7 +2806,7 @@ st.sidebar.header("📊 Dashboard Controls")
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🤖 AI Trading Signals Scanner"],
+    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🤖 AI Trading Signals Scanner", "📊 Master Data Editor", "💼 My Portfolio Tracker"],
     index=0,
     key="main_page_selector"
 )
@@ -6785,6 +6785,406 @@ def show_forex_ml_predictions_page():
         - Real-time forex market insights
         """)
 
+def show_master_data_editor():
+    """Master Data Editor - View and edit NSE 500, NASDAQ 100, and Forex master data"""
+    st.markdown("""
+    # 📊 Master Data Editor
+    
+    ### View and edit master data for NSE 500 and NASDAQ 100 stocks
+    
+    Edit ticker information, recommendation dates, and tracking parameters directly.
+    
+    ---
+    """)
+    
+    # Market selector
+    market = st.selectbox("Select Market to Edit", 
+                          ["NSE 500", "NASDAQ 100"], 
+                          key="master_data_market")
+    
+    # Fetch master data based on market
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        if market == "NSE 500":
+            table_name = "dbo.nse_500"
+        else:
+            table_name = "dbo.NASDAQ_top100"
+        
+        query = f"SELECT * FROM {table_name} ORDER BY ticker"
+        
+        with st.spinner(f"Loading {market} master data..."):
+            df = pd.read_sql(query, conn)
+        
+        conn.close()
+        
+        if df.empty:
+            st.warning(f"No data found in {table_name}")
+            return
+        
+        st.success(f"✅ Loaded {len(df)} records from {market}")
+        
+        # Display editable dataframe
+        st.markdown("### Edit Master Data")
+        st.info("💡 Make changes directly in the table below. Click 'Save Changes' to update the database.")
+        
+        # Use st.data_editor for inline editing
+        edited_df = st.data_editor(
+            df,
+            use_container_width=True,
+            num_rows="dynamic",  # Allow adding/deleting rows
+            key=f"master_data_editor_{market}"
+        )
+        
+        # Save button
+        col1, col2, col3 = st.columns([1, 1, 4])
+        with col1:
+            if st.button("💾 Save Changes", type="primary"):
+                conn = None
+                try:
+                    # Create connection with manual transaction control
+                    connection_string = get_connection_pool()
+                    conn = pyodbc.connect(connection_string)
+                    conn.autocommit = False  # Disable autocommit to use transactions
+                    cursor = conn.cursor()
+                    
+                    # Delete all and reinsert (within transaction)
+                    cursor.execute(f"DELETE FROM {table_name}")
+                    
+                    # Insert edited data with proper date handling
+                    for _, row in edited_df.iterrows():
+                        # Convert datetime columns to proper date format
+                        row_values = []
+                        for col in edited_df.columns:
+                            value = row[col]
+                            # Handle datetime/date conversion
+                            if pd.api.types.is_datetime64_any_dtype(edited_df[col]) and pd.notna(value):
+                                # Convert to date only (remove time component)
+                                if hasattr(value, 'date'):
+                                    row_values.append(value.date())
+                                else:
+                                    row_values.append(value)
+                            elif pd.isna(value):
+                                row_values.append(None)
+                            else:
+                                row_values.append(value)
+                        
+                        columns = ', '.join(edited_df.columns)
+                        placeholders = ', '.join(['?'] * len(edited_df.columns))
+                        insert_query = f"INSERT INTO {table_name} ({columns}) VALUES ({placeholders})"
+                        cursor.execute(insert_query, tuple(row_values))
+                    
+                    # Commit transaction only if everything succeeds
+                    conn.commit()
+                    conn.close()
+                    
+                    st.success(f"✅ Successfully saved {len(edited_df)} records to {table_name}!")
+                    st.balloons()
+                    st.rerun()  # Refresh to show updated data
+                except Exception as e:
+                    # Rollback transaction on error to prevent data loss
+                    if conn:
+                        try:
+                            conn.rollback()
+                            conn.close()
+                            st.error(f"❌ Error saving data: {e}")
+                            st.warning("⚠️ Changes were rolled back. Your original data is safe.")
+                        except:
+                            st.error(f"❌ Error saving data: {e}")
+                    else:
+                        st.error(f"❌ Error saving data: {e}")
+        
+        with col2:
+            if st.button("🔄 Refresh Data"):
+                st.rerun()
+        
+        # Show statistics
+        st.markdown("### Data Statistics")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Records", len(edited_df))
+        with col2:
+            if 'monitor_startdate' in edited_df.columns:
+                monitored = edited_df['monitor_startdate'].notna().sum()
+                st.metric("Monitored Tickers", monitored)
+        with col3:
+            if 'ticker' in edited_df.columns:
+                st.metric("Unique Tickers", edited_df['ticker'].nunique())
+        
+    except Exception as e:
+        st.error(f"❌ Error loading master data: {e}")
+        st.info("Please check your database connection and table structure.")
+
+def show_portfolio_tracker():
+    """Portfolio Tracker - Track personal buy/sell transactions"""
+    st.markdown("""
+    # 💼 My Portfolio Tracker
+    
+    ### Track your personal stock portfolio with buy/sell transactions
+    
+    Monitor your holdings, calculate P&L, and track performance across markets.
+    
+    ---
+    """)
+    
+    # Create portfolio table if not exists
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Create portfolio table if not exists
+        create_table_query = """
+        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='portfolio_tracker' AND xtype='U')
+        CREATE TABLE dbo.portfolio_tracker (
+            id INT IDENTITY(1,1) PRIMARY KEY,
+            ticker VARCHAR(50) NOT NULL,
+            market VARCHAR(20) NOT NULL,
+            buy_date DATE,
+            buy_price FLOAT,
+            buy_qty INT,
+            sell_date DATE,
+            sell_price FLOAT,
+            sell_qty INT,
+            status VARCHAR(20) DEFAULT 'HOLDING',
+            notes VARCHAR(500)
+        )
+        """
+        cursor.execute(create_table_query)
+        conn.commit()
+        
+        # Fetch portfolio data
+        query = """
+        SELECT 
+            id,
+            ticker,
+            market,
+            buy_date,
+            buy_price,
+            buy_qty,
+            sell_date,
+            sell_price,
+            sell_qty,
+            status,
+            notes
+        FROM dbo.portfolio_tracker
+        ORDER BY buy_date DESC
+        """
+        
+        portfolio_df = pd.read_sql(query, conn)
+        
+        # Tabs for different views
+        tab1, tab2, tab3 = st.tabs(["📊 Current Holdings", "➕ Add Transaction", "📜 Transaction History"])
+        
+        with tab1:
+            st.markdown("### Current Holdings")
+            
+            if portfolio_df.empty:
+                st.info("📋 No transactions recorded yet. Add your first transaction in the 'Add Transaction' tab.")
+            else:
+                # Filter for active holdings
+                holdings = portfolio_df[portfolio_df['status'] == 'HOLDING'].copy()
+                
+                if holdings.empty:
+                    st.info("📋 No active holdings. All positions are closed.")
+                else:
+                    # Get current prices for holdings
+                    st.markdown(f"**Total Holdings:** {len(holdings)} positions")
+                    
+                    # Calculate metrics for each holding
+                    for _, holding in holdings.iterrows():
+                        with st.expander(f"📈 {holding['ticker']} ({holding['market']})"):
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("Buy Price", f"${holding['buy_price']:.2f}")
+                            with col2:
+                                st.metric("Quantity", f"{holding['buy_qty']}")
+                            with col3:
+                                investment = holding['buy_price'] * holding['buy_qty']
+                                st.metric("Investment", f"${investment:.2f}")
+                            with col4:
+                                st.metric("Buy Date", holding['buy_date'].strftime('%Y-%m-%d') if pd.notna(holding['buy_date']) else "N/A")
+                            
+                            if holding['notes']:
+                                st.info(f"📝 Notes: {holding['notes']}")
+        
+        with tab2:
+            st.markdown("### Add New Transaction")
+            
+            with st.form("add_transaction_form"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    ticker = st.text_input("Ticker Symbol*", placeholder="e.g., AAPL, RELIANCE")
+                    market = st.selectbox("Market*", ["NSE", "NASDAQ", "Forex"])
+                    buy_date = st.date_input("Buy Date*")
+                    buy_price = st.number_input("Buy Price*", min_value=0.01, step=0.01)
+                    buy_qty = st.number_input("Quantity*", min_value=1, step=1, value=1)
+                
+                with col2:
+                    transaction_type = st.radio("Transaction Type", ["Buy Only", "Buy & Sell"])
+                    
+                    if transaction_type == "Buy & Sell":
+                        sell_date = st.date_input("Sell Date")
+                        sell_price = st.number_input("Sell Price", min_value=0.01, step=0.01)
+                        sell_qty = st.number_input("Sell Quantity", min_value=1, step=1, value=buy_qty)
+                        status = "SOLD"
+                    else:
+                        sell_date = None
+                        sell_price = None
+                        sell_qty = None
+                        status = "HOLDING"
+                    
+                    notes = st.text_area("Notes (Optional)", placeholder="Add any notes about this transaction")
+                
+                submitted = st.form_submit_button("💾 Add Transaction", type="primary")
+                
+                if submitted:
+                    if not ticker or not market or not buy_date or not buy_price or not buy_qty:
+                        st.error("❌ Please fill all required fields marked with *")
+                    else:
+                        try:
+                            insert_query = """
+                            INSERT INTO dbo.portfolio_tracker 
+                            (ticker, market, buy_date, buy_price, buy_qty, sell_date, sell_price, sell_qty, status, notes)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """
+                            cursor.execute(insert_query, 
+                                         (ticker.upper(), market, buy_date, buy_price, buy_qty, 
+                                          sell_date, sell_price, sell_qty, status, notes))
+                            conn.commit()
+                            
+                            # Store success message in session state
+                            st.session_state.portfolio_success = f"✅ Successfully added {status} transaction for {ticker.upper()}!"
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error adding transaction: {e}")
+            
+            # Display success message if it exists
+            if 'portfolio_success' in st.session_state:
+                st.success(st.session_state.portfolio_success)
+                st.balloons()
+                # Clear the message after displaying
+                del st.session_state.portfolio_success
+        
+        with tab3:
+            st.markdown("### Transaction History")
+            
+            if portfolio_df.empty:
+                st.info("📋 No transaction history yet.")
+            else:
+                # Summary metrics
+                col1, col2, col3, col4 = st.columns(4)
+                
+                total_transactions = len(portfolio_df)
+                active_holdings = len(portfolio_df[portfolio_df['status'] == 'HOLDING'])
+                closed_positions = len(portfolio_df[portfolio_df['status'] == 'SOLD'])
+                
+                with col1:
+                    st.metric("Total Transactions", total_transactions)
+                with col2:
+                    st.metric("Active Holdings", active_holdings)
+                with col3:
+                    st.metric("Closed Positions", closed_positions)
+                with col4:
+                    total_investment = (portfolio_df['buy_price'] * portfolio_df['buy_qty']).sum()
+                    st.metric("Total Investment", f"${total_investment:.2f}")
+                
+                # Display editable transaction history
+                st.markdown("---")
+                st.markdown("#### Edit Transactions")
+                st.info("💡 Edit transactions directly in the table below. Click 'Save Changes' to update the database.")
+                
+                # Make dataframe editable
+                edited_portfolio_df = st.data_editor(
+                    portfolio_df,
+                    use_container_width=True,
+                    num_rows="dynamic",  # Allow adding/deleting rows
+                    column_config={
+                        "id": st.column_config.NumberColumn("ID", width="small", disabled=True),
+                        "ticker": st.column_config.TextColumn("Ticker", width="medium"),
+                        "market": st.column_config.SelectboxColumn("Market", width="small", options=["NSE", "NASDAQ", "Forex"]),
+                        "buy_date": st.column_config.DateColumn("Buy Date"),
+                        "buy_price": st.column_config.NumberColumn("Buy Price", format="$%.2f"),
+                        "buy_qty": st.column_config.NumberColumn("Buy Qty"),
+                        "sell_date": st.column_config.DateColumn("Sell Date"),
+                        "sell_price": st.column_config.NumberColumn("Sell Price", format="$%.2f"),
+                        "sell_qty": st.column_config.NumberColumn("Sell Qty"),
+                        "status": st.column_config.SelectboxColumn("Status", width="small", options=["HOLDING", "SOLD"]),
+                        "notes": st.column_config.TextColumn("Notes", width="large")
+                    },
+                    key="portfolio_editor"
+                )
+                
+                # Save and Download buttons
+                col1, col2, col3 = st.columns([1, 1, 4])
+                with col1:
+                    if st.button("💾 Save Changes", type="primary", key="save_portfolio"):
+                        try:
+                            # Create connection with manual transaction control
+                            connection_string = get_connection_pool()
+                            conn_update = pyodbc.connect(connection_string)
+                            conn_update.autocommit = False
+                            cursor_update = conn_update.cursor()
+                            
+                            # Delete all and reinsert (simple approach)
+                            cursor_update.execute("DELETE FROM dbo.portfolio_tracker")
+                            
+                            # Insert edited data with proper date handling
+                            for _, row in edited_portfolio_df.iterrows():
+                                # Handle date conversions
+                                buy_date_val = row['buy_date'].date() if pd.notna(row['buy_date']) and hasattr(row['buy_date'], 'date') else row['buy_date'] if pd.notna(row['buy_date']) else None
+                                sell_date_val = row['sell_date'].date() if pd.notna(row['sell_date']) and hasattr(row['sell_date'], 'date') else row['sell_date'] if pd.notna(row['sell_date']) else None
+                                
+                                insert_query = """
+                                INSERT INTO dbo.portfolio_tracker 
+                                (ticker, market, buy_date, buy_price, buy_qty, sell_date, sell_price, sell_qty, status, notes)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """
+                                cursor_update.execute(insert_query, 
+                                    (row['ticker'], row['market'], buy_date_val, 
+                                     row['buy_price'] if pd.notna(row['buy_price']) else None, 
+                                     row['buy_qty'] if pd.notna(row['buy_qty']) else None,
+                                     sell_date_val, 
+                                     row['sell_price'] if pd.notna(row['sell_price']) else None, 
+                                     row['sell_qty'] if pd.notna(row['sell_qty']) else None,
+                                     row['status'], 
+                                     row['notes'] if pd.notna(row['notes']) else None))
+                            
+                            conn_update.commit()
+                            conn_update.close()
+                            
+                            st.session_state.portfolio_success = f"✅ Successfully updated {len(edited_portfolio_df)} portfolio transactions!"
+                            st.rerun()
+                        except Exception as e:
+                            if conn_update:
+                                try:
+                                    conn_update.rollback()
+                                    conn_update.close()
+                                except:
+                                    pass
+                            st.error(f"❌ Error saving changes: {e}")
+                            st.warning("⚠️ Changes were rolled back. Your data is safe.")
+                
+                with col2:
+                    if st.button("🔄 Refresh Data"):
+                        st.rerun()
+                
+                with col3:
+                    # Download option
+                    st.download_button(
+                        label="📥 Download Portfolio History (CSV)",
+                        data=edited_portfolio_df.to_csv(index=False),
+                        file_name=f"portfolio_history_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+        
+        conn.close()
+        
+    except Exception as e:
+        st.error(f"❌ Error loading portfolio tracker: {e}")
+        st.info("Please check your database connection.")
+
 
 # Main application routing
 if page == "🏠 Home & Filters":
@@ -6807,6 +7207,10 @@ elif page == "📊 Reco Tracking and Current Status":
     show_reco_tracking_page()
 elif page == "📈 Today Trend Recommendations":
     show_today_trend_recommendations_page()
+elif page == "📊 Master Data Editor":
+    show_master_data_editor()
+elif page == "💼 My Portfolio Tracker":
+    show_portfolio_tracker()
 
 elif page == "🤖 AI Trading Signals Scanner":
     show_ai_trading_signals_scanner()
