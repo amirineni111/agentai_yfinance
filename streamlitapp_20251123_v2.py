@@ -292,6 +292,117 @@ def load_atr(index_name: str, ticker: str) -> pd.DataFrame:
         df['trading_date'] = pd.to_datetime(df['trading_date'])
     return df
 
+
+@st.cache_data
+def load_fibonacci(index_name: str, ticker: str) -> pd.DataFrame:
+    """Load Fibonacci retracement and extension levels"""
+    if index_name == 'NSE 500':
+        view = 'nse_500_fibonacci'
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        view = 'forex_fibonacci'
+        ticker_col = 'symbol'
+    else:
+        view = 'nasdaq_100_fibonacci'
+        ticker_col = 'ticker'
+        
+    q = f"""SELECT trading_date, close_price,
+                   fib_20d_0236, fib_20d_0382, fib_20d_0500, fib_20d_0618, fib_20d_0786,
+                   fib_50d_0236, fib_50d_0382, fib_50d_0500, fib_50d_0618, fib_50d_0786,
+                   fib_20d_ext_1272, fib_20d_ext_1618, fib_20d_ext_2000,
+                   fib_trade_signal, fib_position
+            FROM dbo.{view}
+            WHERE {ticker_col} = ?
+            ORDER BY trading_date"""
+    df = execute_query_safe(q, params=[ticker])
+    if not df.empty:
+        df['trading_date'] = pd.to_datetime(df['trading_date'])
+    return df
+
+
+@st.cache_data
+def load_stochastic(index_name: str, ticker: str) -> pd.DataFrame:
+    """Load Stochastic oscillator indicators"""
+    if index_name == 'NSE 500':
+        view = 'nse_500_stochastic'
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        view = 'forex_stochastic'
+        ticker_col = 'symbol'
+    else:
+        view = 'nasdaq_100_stochastic'
+        ticker_col = 'ticker'
+        
+    q = f"""SELECT trading_date, close_price,
+                   stoch_5d_k, stoch_5d_d,
+                   stoch_14d_k, stoch_14d_d,
+                   stoch_21d_k, stoch_21d_d,
+                   stoch_crossover, stoch_status, stoch_trade_signal
+            FROM dbo.{view}
+            WHERE {ticker_col} = ?
+            ORDER BY trading_date"""
+    df = execute_query_safe(q, params=[ticker])
+    if not df.empty:
+        df['trading_date'] = pd.to_datetime(df['trading_date'])
+    return df
+
+
+@st.cache_data
+def load_support_resistance(index_name: str, ticker: str) -> pd.DataFrame:
+    """Load Support & Resistance levels"""
+    if index_name == 'NSE 500':
+        view = 'nse_500_support_resistance'
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        view = 'forex_support_resistance'
+        ticker_col = 'symbol'
+    else:
+        view = 'nasdaq_100_support_resistance'
+        ticker_col = 'ticker'
+        
+    q = f"""SELECT trading_date, close_price,
+                   pivot_point, r1, r2, r3,
+                   s1, s2, s3,
+                   swing_high_20d, swing_low_20d,
+                   sr_trade_signal, pivot_status
+            FROM dbo.{view}
+            WHERE {ticker_col} = ?
+            ORDER BY trading_date"""
+    df = execute_query_safe(q, params=[ticker])
+    if not df.empty:
+        df['trading_date'] = pd.to_datetime(df['trading_date'])
+    return df
+
+
+@st.cache_data
+def load_candlestick_patterns(index_name: str, ticker: str) -> pd.DataFrame:
+    """Load Candlestick pattern detection"""
+    if index_name == 'NSE 500':
+        view = 'nse_500_patterns'
+        ticker_col = 'ticker'
+    elif index_name == 'Forex':
+        view = 'forex_patterns'
+        ticker_col = 'symbol'
+    else:
+        view = 'nasdaq_100_patterns'
+        ticker_col = 'ticker'
+        
+    q = f"""SELECT trading_date, close_price,
+                   doji, hammer, shooting_star,
+                   bullish_engulfing, bearish_engulfing,
+                   morning_star, evening_star,
+                   cup_and_handle, inverse_cup_handle,
+                   double_top, double_bottom,
+                   head_and_shoulders, inverse_head_shoulders,
+                   patterns_detected, pattern_signal
+            FROM dbo.{view}
+            WHERE {ticker_col} = ?
+            ORDER BY trading_date"""
+    df = execute_query_safe(q, params=[ticker])
+    if not df.empty:
+        df['trading_date'] = pd.to_datetime(df['trading_date'])
+    return df
+
 # ----------------------------
 # TREND ANALYSIS FUNCTIONS
 # ----------------------------
@@ -1177,7 +1288,8 @@ def enhance_chart_layout(fig, title, height=600):
     
     return fig
 
-def plot_indicator_section(price_df, rsi_df, macd_df, bb_df, ema_sma_df, atr_df, ticker, index_name):
+def plot_indicator_section(price_df, rsi_df, macd_df, bb_df, ema_sma_df, atr_df, ticker, index_name,
+                          fibonacci_df=None, stochastic_df=None, support_resistance_df=None, candlestick_patterns_df=None):
     st.subheader(f"📈 Interactive Price & Indicator Charts for {ticker} ({index_name})")
     
     # Add chart controls
@@ -2108,6 +2220,322 @@ def plot_indicator_section(price_df, rsi_df, macd_df, bb_df, ema_sma_df, atr_df,
             st.plotly_chart(fig_ad, width="stretch", config=create_enhanced_plotly_config())
     else:
         st.info("📊 Volume data not available for volume-based indicators.")
+    
+    # ----------------------------
+    # NEW ADVANCED INDICATORS
+    # ----------------------------
+    
+    # 7. Fibonacci Retracement & Extension Levels
+    if fibonacci_df is not None and not fibonacci_df.empty:
+        st.markdown("---")
+        st.markdown("### 📐 Fibonacci Retracement & Extension Levels")
+        
+        with st.expander("📚 Understanding Fibonacci Levels", expanded=False):
+            st.markdown("""
+            **Key Fibonacci Levels:**
+            - **23.6%**: Minor support/resistance
+            - **38.2%**: Moderate pullback level
+            - **50.0%**: Psychological level (not Fibonacci, but widely watched)
+            - **61.8%**: The Golden Ratio - strongest Fibonacci level
+            - **78.6%**: Deep retracement before reversal
+            
+            **Extension Levels (Profit Targets):**
+            - **127.2%**: First profit target
+            - **161.8%**: Major profit target (Golden extension)
+            - **200.0%**: Extreme profit target
+            
+            **Trading Strategy:**
+            - Look for bounces at Fibonacci support levels
+            - Set profit targets at extension levels
+            - Combine with other indicators for confirmation
+            """)
+        
+        # Display current Fibonacci signals
+        if 'fib_trade_signal' in fibonacci_df.columns:
+            latest_signal = fibonacci_df['fib_trade_signal'].iloc[-1] if not fibonacci_df.empty else "NO_SIGNAL"
+            latest_position = fibonacci_df['fib_position'].iloc[-1] if 'fib_position' in fibonacci_df.columns else "N/A"
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                signal_emoji = "🟢" if "BUY" in str(latest_signal) else "🔴" if "SELL" in str(latest_signal) else "🟡"
+                st.metric("Current Fibonacci Signal", f"{signal_emoji} {latest_signal}")
+            with col2:
+                st.metric("Price Position", latest_position)
+        
+        # Fibonacci chart
+        fig_fib = go.Figure()
+        fig_fib.add_trace(go.Scatter(
+            x=fibonacci_df['trading_date'], y=fibonacci_df['close_price'],
+            mode='lines', name='Close Price',
+            line=dict(color='blue', width=2)
+        ))
+        
+        # Add key Fibonacci levels
+        if 'fib_20d_0618' in fibonacci_df.columns:
+            fig_fib.add_trace(go.Scatter(
+                x=fibonacci_df['trading_date'], y=fibonacci_df['fib_20d_0618'],
+                mode='lines', name='Fib 61.8% (20d)',
+                line=dict(color='gold', width=1, dash='dash')
+            ))
+        if 'fib_20d_0500' in fibonacci_df.columns:
+            fig_fib.add_trace(go.Scatter(
+                x=fibonacci_df['trading_date'], y=fibonacci_df['fib_20d_0500'],
+                mode='lines', name='Fib 50% (20d)',
+                line=dict(color='orange', width=1, dash='dot')
+            ))
+        
+        fig_fib.update_layout(
+            title=f"Fibonacci Levels for {ticker}",
+            xaxis_title="Date",
+            yaxis_title="Price",
+            height=500,
+            hovermode='x unified'
+        )
+        st.plotly_chart(fig_fib, use_container_width=True, config=create_enhanced_plotly_config())
+    
+    # 8. Stochastic Oscillator
+    if stochastic_df is not None and not stochastic_df.empty:
+        st.markdown("---")
+        st.markdown("### 🎢 Stochastic Oscillator - Momentum Indicator")
+        
+        with st.expander("📚 Stochastic Oscillator Guide", expanded=False):
+            st.markdown("""
+            **Stochastic Basics:**
+            - **%K Line**: Fast line (like MACD)
+            - **%D Line**: Slow line (3-period moving average of %K)
+            - **Range**: 0-100
+            
+            **Overbought/Oversold:**
+            - **Above 80**: Overbought zone → potential sell
+            - **Below 20**: Oversold zone → potential buy
+            - **50-80**: Bullish momentum
+            - **20-50**: Bearish momentum
+            
+            **Trading Signals:**
+            - **Bullish Cross**: %K crosses above %D in oversold zone
+            - **Bearish Cross**: %K crosses below %D in overbought zone
+            - **Divergence**: Price makes new high/low but Stochastic doesn't
+            """)
+        
+        # Display current Stochastic status
+        if 'stoch_14d_k' in stochastic_df.columns:
+            latest_k = stochastic_df['stoch_14d_k'].iloc[-1]
+            latest_d = stochastic_df['stoch_14d_d'].iloc[-1]
+            latest_status = stochastic_df['stoch_status'].iloc[-1] if 'stoch_status' in stochastic_df.columns else "N/A"
+            latest_signal = stochastic_df['stoch_trade_signal'].iloc[-1] if 'stoch_trade_signal' in stochastic_df.columns else "NO_SIGNAL"
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("%K (14d)", f"{latest_k:.1f}")
+            with col2:
+                st.metric("%D (14d)", f"{latest_d:.1f}")
+            with col3:
+                status_emoji = "🔴" if "OVERBOUGHT" in latest_status else "🟢" if "OVERSOLD" in latest_status else "🟡"
+                st.metric("Status", f"{status_emoji} {latest_status}")
+            with col4:
+                signal_emoji = "🟢" if "BUY" in latest_signal else "🔴" if "SELL" in latest_signal else "🟡"
+                st.metric("Signal", f"{signal_emoji} {latest_signal.replace('_', ' ')}")
+        
+        # Stochastic chart
+        fig_stoch = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                  vertical_spacing=0.03, row_heights=[0.6, 0.4])
+        
+        # Price chart
+        fig_stoch.add_trace(go.Scatter(
+            x=stochastic_df['trading_date'], y=stochastic_df['close_price'],
+            mode='lines', name='Close Price',
+            line=dict(color='blue', width=2)
+        ), row=1, col=1)
+        
+        # Stochastic %K and %D
+        fig_stoch.add_trace(go.Scatter(
+            x=stochastic_df['trading_date'], y=stochastic_df['stoch_14d_k'],
+            mode='lines', name='%K (14)',
+            line=dict(color='blue', width=2)
+        ), row=2, col=1)
+        
+        fig_stoch.add_trace(go.Scatter(
+            x=stochastic_df['trading_date'], y=stochastic_df['stoch_14d_d'],
+            mode='lines', name='%D (14)',
+            line=dict(color='red', width=2)
+        ), row=2, col=1)
+        
+        # Add overbought/oversold lines
+        fig_stoch.add_hline(y=80, line_dash="dash", line_color="red", annotation_text="Overbought", row=2, col=1)
+        fig_stoch.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="Oversold", row=2, col=1)
+        fig_stoch.add_hline(y=50, line_dash="dot", line_color="gray", row=2, col=1)
+        
+        fig_stoch.update_layout(
+            title=f"Stochastic Oscillator for {ticker}",
+            height=600,
+            hovermode='x unified'
+        )
+        fig_stoch.update_yaxes(range=[0, 100], row=2, col=1)
+        fig_stoch.update_xaxes(rangeslider=dict(visible=True), row=2, col=1)
+        st.plotly_chart(fig_stoch, use_container_width=True, config=create_enhanced_plotly_config())
+    
+    # 9. Support & Resistance Levels
+    if support_resistance_df is not None and not support_resistance_df.empty:
+        st.markdown("---")
+        st.markdown("### 🎯 Support & Resistance Levels - Key Price Zones")
+        
+        with st.expander("📚 Support & Resistance Trading Guide", expanded=False):
+            st.markdown("""
+            **Support & Resistance Basics:**
+            - **Pivot Point**: Central reference level calculated from previous period
+            - **Resistance (R1, R2, R3)**: Price levels where selling pressure expected
+            - **Support (S1, S2, S3)**: Price levels where buying pressure expected
+            
+            **Trading Strategies:**
+            - **Buy near support**: Enter long positions when price approaches S1/S2
+            - **Sell near resistance**: Take profits or short when price reaches R1/R2
+            - **Breakout trading**: Strong moves above R3 or below S3 signal trends
+            - **Range trading**: Trade between support and resistance in sideways markets
+            
+            **Price Zones:**
+            - **BULLISH_ZONE**: Price above pivot point
+            - **BEARISH_ZONE**: Price below pivot point
+            - **NEAR_SUPPORT_BUY**: Price approaching support level
+            - **NEAR_RESISTANCE_SELL**: Price approaching resistance level
+            """)
+        
+        # Display current S/R levels
+        if 'sr_trade_signal' in support_resistance_df.columns:
+            latest_signal = support_resistance_df['sr_trade_signal'].iloc[-1]
+            latest_zone = support_resistance_df['pivot_status'].iloc[-1] if 'pivot_status' in support_resistance_df.columns else "N/A"
+            current_price = support_resistance_df['close_price'].iloc[-1]
+            pivot = support_resistance_df['pivot_point'].iloc[-1] if 'pivot_point' in support_resistance_df.columns else 0
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Current Price", f"${current_price:.2f}")
+            with col2:
+                st.metric("Pivot Point", f"${pivot:.2f}")
+            with col3:
+                zone_emoji = "🟢" if "ABOVE" in latest_zone else "🔴" if "BELOW" in latest_zone else "🟡"
+                st.metric("Price Zone", f"{zone_emoji} {latest_zone}")
+            with col4:
+                signal_emoji = "🟢" if "BUY" in latest_signal else "🔴" if "SELL" in latest_signal else "🟡"
+                st.metric("Trading Signal", f"{signal_emoji} {latest_signal.replace('_', ' ')}")
+        
+        # S/R chart with levels
+        fig_sr = go.Figure()
+        fig_sr.add_trace(go.Scatter(
+            x=support_resistance_df['trading_date'],
+            y=support_resistance_df['close_price'],
+            mode='lines', name='Close Price',
+            line=dict(color='blue', width=2)
+        ))
+        
+        # Add S/R levels
+        if 'r3' in support_resistance_df.columns:
+            fig_sr.add_trace(go.Scatter(
+                x=support_resistance_df['trading_date'], y=support_resistance_df['r3'],
+                mode='lines', name='R3', line=dict(color='darkred', width=1, dash='dash')
+            ))
+        if 'r2' in support_resistance_df.columns:
+            fig_sr.add_trace(go.Scatter(
+                x=support_resistance_df['trading_date'], y=support_resistance_df['r2'],
+                mode='lines', name='R2', line=dict(color='red', width=1, dash='dash')
+            ))
+        if 'r1' in support_resistance_df.columns:
+            fig_sr.add_trace(go.Scatter(
+                x=support_resistance_df['trading_date'], y=support_resistance_df['r1'],
+                mode='lines', name='R1', line=dict(color='orange', width=1, dash='dash')
+            ))
+        if 'pivot_point' in support_resistance_df.columns:
+            fig_sr.add_trace(go.Scatter(
+                x=support_resistance_df['trading_date'], y=support_resistance_df['pivot_point'],
+                mode='lines', name='Pivot', line=dict(color='purple', width=2)
+            ))
+        if 's1' in support_resistance_df.columns:
+            fig_sr.add_trace(go.Scatter(
+                x=support_resistance_df['trading_date'], y=support_resistance_df['s1'],
+                mode='lines', name='S1', line=dict(color='lightgreen', width=1, dash='dash')
+            ))
+        if 's2' in support_resistance_df.columns:
+            fig_sr.add_trace(go.Scatter(
+                x=support_resistance_df['trading_date'], y=support_resistance_df['s2'],
+                mode='lines', name='S2', line=dict(color='green', width=1, dash='dash')
+            ))
+        if 's3' in support_resistance_df.columns:
+            fig_sr.add_trace(go.Scatter(
+                x=support_resistance_df['trading_date'], y=support_resistance_df['s3'],
+                mode='lines', name='S3', line=dict(color='darkgreen', width=1, dash='dash')
+            ))
+        
+        fig_sr.update_layout(
+            title=f"Support & Resistance Levels for {ticker}",
+            xaxis_title="Date",
+            yaxis_title="Price",
+            height=600,
+            hovermode='x unified'
+        )
+        fig_sr.update_xaxes(rangeslider=dict(visible=True))
+        st.plotly_chart(fig_sr, use_container_width=True, config=create_enhanced_plotly_config())
+    
+    # 10. Candlestick Pattern Detection
+    if candlestick_patterns_df is not None and not candlestick_patterns_df.empty:
+        st.markdown("---")
+        st.markdown("### 🕯️ Candlestick Pattern Recognition")
+        
+        with st.expander("📚 Candlestick Patterns Encyclopedia", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("""
+                **Bullish Patterns:**
+                - **Hammer**: Reversal signal at bottom
+                - **Bullish Engulfing**: Strong reversal
+                - **Morning Star**: 3-candle reversal pattern
+                - **Inverse Head & Shoulders**: Major reversal
+                - **Cup and Handle**: Continuation pattern
+                - **Double Bottom**: Support confirmation
+                """)
+            with col2:
+                st.markdown("""
+                **Bearish Patterns:**
+                - **Shooting Star**: Reversal at top
+                - **Bearish Engulfing**: Strong reversal down
+                - **Evening Star**: 3-candle bearish reversal
+                - **Head & Shoulders**: Major reversal
+                - **Inverse Cup Handle**: Bearish continuation
+                - **Double Top**: Resistance confirmation
+                """)
+        
+        # Display recent patterns
+        if 'patterns_detected' in candlestick_patterns_df.columns:
+            patterns_last_30 = candlestick_patterns_df.tail(30)
+            patterns_found = patterns_last_30[patterns_last_30['patterns_detected'].notna()]
+            
+            if not patterns_found.empty:
+                st.markdown("#### 🔍 Recent Patterns Detected (Last 30 Days)")
+                
+                # Show pattern summary
+                latest_pattern = patterns_found.iloc[-1]
+                latest_signal = latest_pattern['pattern_signal'] if 'pattern_signal' in latest_pattern else "NO_PATTERN"
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    signal_emoji = "🟢" if "BUY" in latest_signal else "🔴" if "SELL" in latest_signal else "🟡"
+                    st.metric("Latest Pattern Signal", f"{signal_emoji} {latest_signal}")
+                with col2:
+                    st.metric("Patterns in Last 30 Days", len(patterns_found))
+                
+                # Display patterns table
+                display_df = patterns_found[['trading_date', 'close_price', 'patterns_detected', 'pattern_signal']].copy()
+                display_df['trading_date'] = display_df['trading_date'].dt.strftime('%Y-%m-%d')
+                st.dataframe(
+                    display_df.sort_values('trading_date', ascending=False),
+                    use_container_width=True,
+                    column_config={
+                        'trading_date': 'Date',
+                        'close_price': st.column_config.NumberColumn('Close Price', format="$%.2f"),
+                        'patterns_detected': 'Pattern(s)',
+                        'pattern_signal': 'Signal'
+                    }
+                )
+            else:
+                st.info("No candlestick patterns detected in the last 30 days.")
 
 
 def plot_signal_view(view_type: str, df: pd.DataFrame, label: str):
@@ -2806,7 +3234,7 @@ st.sidebar.header("📊 Dashboard Controls")
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🤖 AI Trading Signals Scanner", "📊 Master Data Editor", "💼 My Portfolio Tracker"],
+    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🤖 AI Trading Signals Scanner", "📊 Master Data Editor", "💼 My Portfolio Tracker", "👨‍👩‍👧‍👦 For Family"],
     index=0,
     key="main_page_selector"
 )
@@ -3474,6 +3902,12 @@ This comprehensive technical analysis combines **professional indicators**, **tr
         macd_df = load_macd(index_option, selected_ticker)
         ema_sma_df = load_ema_sma(index_option, selected_ticker)
         atr_df = load_atr(index_option, selected_ticker)
+        
+        # Load new advanced indicators
+        fibonacci_df = load_fibonacci(index_option, selected_ticker)
+        stochastic_df = load_stochastic(index_option, selected_ticker)
+        support_resistance_df = load_support_resistance(index_option, selected_ticker)
+        candlestick_patterns_df = load_candlestick_patterns(index_option, selected_ticker)
 
     if price_df is None or price_df.empty:
         st.error("❌ No price data available for this ticker.")
@@ -3562,6 +3996,7 @@ This comprehensive technical analysis combines **professional indicators**, **tr
             plot_indicator_section(
                 price_df, rsi_df, macd_df, bb_df, ema_sma_df, atr_df,
                 selected_ticker, index_option,
+                fibonacci_df, stochastic_df, support_resistance_df, candlestick_patterns_df
             )
 
     # ----------------------------
@@ -3710,7 +4145,9 @@ This comprehensive technical analysis combines **professional indicators**, **tr
             """)
 
         # Create a comprehensive trading decision analysis
-        def analyze_trading_signals(bb_df, macd_df, rsi_df, sma_df, atr_df):
+        def analyze_trading_signals(bb_df, macd_df, rsi_df, sma_df, atr_df,
+                                    fibonacci_df=None, stochastic_df=None, 
+                                    support_resistance_df=None, candlestick_patterns_df=None):
             decisions = []
             
             # Get latest values for analysis
@@ -3736,10 +4173,39 @@ This comprehensive technical analysis combines **professional indicators**, **tr
                 latest_sma_signal = sma_df['sma_trade_signal'].iloc[-1] if sma_df['sma_trade_signal'].notna().any() else None
                 latest_data['sma_signal'] = latest_sma_signal
             
+            # Fibonacci analysis
+            if fibonacci_df is not None and not fibonacci_df.empty and 'fib_trade_signal' in fibonacci_df.columns:
+                latest_fib_signal = fibonacci_df['fib_trade_signal'].iloc[-1] if fibonacci_df['fib_trade_signal'].notna().any() else None
+                latest_data['fib_signal'] = latest_fib_signal
+                if 'fib_position' in fibonacci_df.columns:
+                    latest_data['fib_position'] = fibonacci_df['fib_position'].iloc[-1]
+            
+            # Stochastic analysis
+            if stochastic_df is not None and not stochastic_df.empty and 'stoch_trade_signal' in stochastic_df.columns:
+                latest_stoch_signal = stochastic_df['stoch_trade_signal'].iloc[-1] if stochastic_df['stoch_trade_signal'].notna().any() else None
+                latest_data['stoch_signal'] = latest_stoch_signal
+                if 'stoch_status' in stochastic_df.columns:
+                    latest_data['stoch_status'] = stochastic_df['stoch_status'].iloc[-1]
+            
+            # Support/Resistance analysis
+            if support_resistance_df is not None and not support_resistance_df.empty and 'sr_trade_signal' in support_resistance_df.columns:
+                latest_sr_signal = support_resistance_df['sr_trade_signal'].iloc[-1] if support_resistance_df['sr_trade_signal'].notna().any() else None
+                latest_data['sr_signal'] = latest_sr_signal
+                if 'pivot_status' in support_resistance_df.columns:
+                    latest_data['pivot_status'] = support_resistance_df['pivot_status'].iloc[-1]
+            
+            # Candlestick Pattern analysis
+            if candlestick_patterns_df is not None and not candlestick_patterns_df.empty and 'pattern_signal' in candlestick_patterns_df.columns:
+                latest_pattern_signal = candlestick_patterns_df['pattern_signal'].iloc[-1] if candlestick_patterns_df['pattern_signal'].notna().any() else None
+                latest_data['pattern_signal'] = latest_pattern_signal
+                if 'patterns_detected' in candlestick_patterns_df.columns:
+                    latest_data['patterns_detected'] = candlestick_patterns_df['patterns_detected'].iloc[-1]
+            
             return latest_data
 
-        # Analyze current signals
-        signal_analysis = analyze_trading_signals(bb_signals_df, macd_signals_df, rsi_signals_df, sma_signals_df, atr_spikes_df)
+        # Analyze current signals with all indicators
+        signal_analysis = analyze_trading_signals(bb_signals_df, macd_signals_df, rsi_signals_df, sma_signals_df, atr_spikes_df,
+                                                  fibonacci_df, stochastic_df, support_resistance_df, candlestick_patterns_df)
         
         # Add comparison table to show difference between chart view and trading signals
         st.markdown("### 📊 Signal Comparison: Chart View vs Trading Action")
@@ -3820,6 +4286,71 @@ This comprehensive technical analysis combines **professional indicators**, **tr
             'Meaning': 'Chart shows price position, Signal shows band bounce opportunities'
         })
         
+        # Fibonacci Comparison
+        fib_chart_status = "N/A"
+        if not fibonacci_df.empty and 'fib_position' in fibonacci_df.columns:
+            fib_position = fibonacci_df['fib_position'].iloc[-1]
+            if pd.notna(fib_position):
+                fib_chart_status = f"📊 {fib_position}"
+        
+        fib_action_signal = signal_analysis.get('fib_signal', 'N/A')
+        comparison_data.append({
+            'Indicator': 'Fibonacci',
+            'Chart View (Trend)': fib_chart_status,
+            'Trading Signal (Action)': f"{'🟢' if 'buy' in str(fib_action_signal).lower() else '🔴' if 'sell' in str(fib_action_signal).lower() else '🟡'} {fib_action_signal}",
+            'Meaning': 'Chart shows price at key retracement levels, Signal shows reversal zones'
+        })
+        
+        # Stochastic Comparison
+        stoch_chart_status = "N/A"
+        if not stochastic_df.empty and 'stoch_status' in stochastic_df.columns:
+            stoch_status = stochastic_df['stoch_status'].iloc[-1]
+            if pd.notna(stoch_status):
+                if 'Overbought' in str(stoch_status):
+                    stoch_chart_status = "🔴 Overbought"
+                elif 'Oversold' in str(stoch_status):
+                    stoch_chart_status = "🟢 Oversold"
+                else:
+                    stoch_chart_status = "🟡 Neutral"
+        
+        stoch_action_signal = signal_analysis.get('stoch_signal', 'N/A')
+        comparison_data.append({
+            'Indicator': 'Stochastic',
+            'Chart View (Trend)': stoch_chart_status,
+            'Trading Signal (Action)': f"{'🟢' if 'buy' in str(stoch_action_signal).lower() else '🔴' if 'sell' in str(stoch_action_signal).lower() else '🟡'} {stoch_action_signal}",
+            'Meaning': 'Chart shows momentum zones, Signal shows %K/%D crossovers'
+        })
+        
+        # Support/Resistance Comparison
+        sr_chart_status = "N/A"
+        if not support_resistance_df.empty and 'pivot_status' in support_resistance_df.columns:
+            pivot_status = support_resistance_df['pivot_status'].iloc[-1]
+            if pd.notna(pivot_status):
+                sr_chart_status = f"📍 {pivot_status}"
+        
+        sr_action_signal = signal_analysis.get('sr_signal', 'N/A')
+        comparison_data.append({
+            'Indicator': 'Support/Resistance',
+            'Chart View (Trend)': sr_chart_status,
+            'Trading Signal (Action)': f"{'🟢' if 'buy' in str(sr_action_signal).lower() else '🔴' if 'sell' in str(sr_action_signal).lower() else '🟡'} {sr_action_signal}",
+            'Meaning': 'Chart shows price at key levels, Signal shows bounce/breakout opportunities'
+        })
+        
+        # Candlestick Pattern Comparison
+        pattern_chart_status = "N/A"
+        if not candlestick_patterns_df.empty and 'patterns_detected' in candlestick_patterns_df.columns:
+            patterns = candlestick_patterns_df['patterns_detected'].iloc[-1]
+            if pd.notna(patterns) and str(patterns) != 'None':
+                pattern_chart_status = f"🕯️ {patterns}"
+        
+        pattern_action_signal = signal_analysis.get('pattern_signal', 'N/A')
+        comparison_data.append({
+            'Indicator': 'Candlestick Patterns',
+            'Chart View (Trend)': pattern_chart_status,
+            'Trading Signal (Action)': f"{'🟢' if 'buy' in str(pattern_action_signal).lower() or 'bullish' in str(pattern_action_signal).lower() else '🔴' if 'sell' in str(pattern_action_signal).lower() or 'bearish' in str(pattern_action_signal).lower() else '🟡'} {pattern_action_signal}",
+            'Meaning': 'Chart shows pattern formation, Signal shows pattern interpretation'
+        })
+        
         # Display comparison table
         comparison_df = pd.DataFrame(comparison_data)
         st.dataframe(comparison_df, use_container_width=True, hide_index=True)
@@ -3845,7 +4376,11 @@ This comprehensive technical analysis combines **professional indicators**, **tr
                 'bb_signal': 'Bollinger Bands',
                 'macd_signal': 'MACD',
                 'rsi_signal': 'RSI',
-                'sma_signal': 'SMA Crossover'
+                'sma_signal': 'SMA Crossover',
+                'fib_signal': 'Fibonacci',
+                'stoch_signal': 'Stochastic',
+                'sr_signal': 'Support/Resistance',
+                'pattern_signal': 'Candlestick Patterns'
             }
             
             for indicator, signal in signal_analysis.items():
@@ -3895,22 +4430,46 @@ This comprehensive technical analysis combines **professional indicators**, **tr
         with col2:
             st.markdown("### 🎯 Trading Recommendation")
             
-            if buy_signals > sell_signals and buy_signals >= 2:
-                recommendation = "🟢 **BULLISH BIAS** - Consider Long Positions"
-                confidence = "High" if buy_signals >= 3 else "Medium"
-                action = "Look for buying opportunities on dips"
-            elif sell_signals > buy_signals and sell_signals >= 2:
-                recommendation = "🔴 **BEARISH BIAS** - Consider Short Positions"
-                confidence = "High" if sell_signals >= 3 else "Medium"
-                action = "Look for selling opportunities on rallies"
+            # Enhanced thresholds for 9 indicators (up from 4)
+            if buy_signals > sell_signals and buy_signals >= 3:
+                recommendation = "🟢 **STRONG BULLISH BIAS** - Consider Long Positions"
+                confidence = "Very High" if buy_signals >= 5 else "High" if buy_signals >= 4 else "Medium"
+                action = "Look for buying opportunities on dips with multiple confirmations"
+            elif sell_signals > buy_signals and sell_signals >= 3:
+                recommendation = "🔴 **STRONG BEARISH BIAS** - Consider Short Positions"
+                confidence = "Very High" if sell_signals >= 5 else "High" if sell_signals >= 4 else "Medium"
+                action = "Look for selling opportunities on rallies with multiple confirmations"
+            elif buy_signals > sell_signals:
+                recommendation = "🟢 **MILD BULLISH BIAS** - Cautiously Bullish"
+                confidence = "Medium"
+                action = "Wait for additional confirmation before entering long positions"
+            elif sell_signals > buy_signals:
+                recommendation = "🔴 **MILD BEARISH BIAS** - Cautiously Bearish"
+                confidence = "Medium"
+                action = "Wait for additional confirmation before entering short positions"
             else:
-                recommendation = "🟡 **MIXED SIGNALS** - Stay Cautious"
+                recommendation = "🟡 **MIXED SIGNALS** - Stay Neutral"
                 confidence = "Low"
-                action = "Wait for clearer signals before entering positions"
+                action = "Wait for clearer signals before entering any positions"
             
             st.markdown(recommendation)
             st.markdown(f"**Confidence Level:** {confidence}")
             st.markdown(f"**Suggested Action:** {action}")
+            
+            # Add signal strength bar
+            st.markdown("---")
+            st.markdown("#### Signal Strength Distribution")
+            signal_strength_data = {
+                'Type': ['Bullish', 'Bearish', 'Neutral'],
+                'Count': [buy_signals, sell_signals, neutral_signals]
+            }
+            import plotly.express as px
+            fig_strength = px.bar(signal_strength_data, x='Type', y='Count', 
+                                 color='Type',
+                                 color_discrete_map={'Bullish': 'green', 'Bearish': 'red', 'Neutral': 'gray'},
+                                 title=f'Signal Distribution ({total_signals} total indicators)')
+            fig_strength.update_layout(showlegend=False, height=300)
+            st.plotly_chart(fig_strength, use_container_width=True)
 
         # Add risk management reminder
         st.markdown("### ⚠️ Risk Management Checklist")
@@ -4080,12 +4639,56 @@ def show_ml_prediction_page():
         macd_df = load_macd(index_option, selected_ticker)
         atr_df = load_atr(index_option, selected_ticker)
         
+        # Load new advanced indicators for ML features
+        fibonacci_df = load_fibonacci(index_option, selected_ticker)
+        stochastic_df = load_stochastic(index_option, selected_ticker)
+        support_resistance_df = load_support_resistance(index_option, selected_ticker)
+        candlestick_patterns_df = load_candlestick_patterns(index_option, selected_ticker)
+        
         # Merge all indicators
         if not rsi_df.empty:
             ml_df = ml_df.merge(rsi_df[['trading_date', 'RSI']], on='trading_date', how='left')
         if not macd_df.empty:
             ml_df = ml_df.merge(macd_df[['trading_date', 'MACD', 'Signal_Line']], on='trading_date', how='left')
         if not atr_df.empty:
+            ml_df = ml_df.merge(atr_df[['trading_date', 'ATR_14']], on='trading_date', how='left')
+        
+        # Merge new advanced indicators
+        if not fibonacci_df.empty:
+            # Add key Fibonacci levels as features
+            fib_cols = ['trading_date', 'fib_20d_0382', 'fib_20d_0500', 'fib_20d_0618', 'fib_50d_0618']
+            ml_df = ml_df.merge(fibonacci_df[fib_cols], on='trading_date', how='left')
+        
+        if not stochastic_df.empty:
+            # Add Stochastic %K and %D for 14-day period
+            stoch_cols = ['trading_date', 'stoch_14d_k', 'stoch_14d_d']
+            ml_df = ml_df.merge(stochastic_df[stoch_cols], on='trading_date', how='left')
+        
+        if not support_resistance_df.empty:
+            # Add pivot points and key S/R levels
+            sr_cols = ['trading_date', 'pivot_point', 'r1', 's1']
+            ml_df = ml_df.merge(support_resistance_df[sr_cols], on='trading_date', how='left')
+        
+        if not candlestick_patterns_df.empty:
+            # Add pattern signals as categorical features
+            # Create binary flags for key patterns
+            patterns_to_add = candlestick_patterns_df[['trading_date']].copy()
+            patterns_to_add['has_bullish_pattern'] = (
+                candlestick_patterns_df['bullish_engulfing'].notna() | 
+                candlestick_patterns_df['morning_star'].notna() |
+                candlestick_patterns_df['hammer'].notna() |
+                candlestick_patterns_df['inverse_head_shoulders'].notna()
+            ).astype(int)
+            patterns_to_add['has_bearish_pattern'] = (
+                candlestick_patterns_df['bearish_engulfing'].notna() |
+                candlestick_patterns_df['evening_star'].notna() |
+                candlestick_patterns_df['shooting_star'].notna() |
+                candlestick_patterns_df['head_and_shoulders'].notna()
+            ).astype(int)
+            ml_df = ml_df.merge(patterns_to_add, on='trading_date', how='left')
+            # Fill NaN with 0 for pattern flags
+            ml_df['has_bullish_pattern'] = ml_df['has_bullish_pattern'].fillna(0)
+            ml_df['has_bearish_pattern'] = ml_df['has_bearish_pattern'].fillna(0)
             ml_df = ml_df.merge(atr_df[['trading_date', 'ATR_14']], on='trading_date', how='left')
       # ML Configuration
     st.markdown("## ⚙️ Enhanced ML Model Configuration")
@@ -4232,6 +4835,19 @@ def show_ml_prediction_page():
         if feature_set == "All Features":
             extra_features = ['RSI', 'MACD', 'Signal_Line', 'ATR_14']
             base_features.extend([f for f in extra_features if f in df.columns])
+            
+            # Add new advanced indicator features
+            advanced_indicator_features = [
+                # Fibonacci levels
+                'fib_20d_0382', 'fib_20d_0500', 'fib_20d_0618', 'fib_50d_0618',
+                # Stochastic oscillator
+                'stoch_14d_k', 'stoch_14d_d',
+                # Support & Resistance
+                'pivot_point', 'r1', 's1',
+                # Candlestick patterns
+                'has_bullish_pattern', 'has_bearish_pattern'
+            ]
+            base_features.extend([f for f in advanced_indicator_features if f in df.columns])
         
         # Create feature matrix
         available_features = [f for f in base_features if f in df.columns]
@@ -4779,20 +5395,44 @@ def show_flight_status_page():
         **Data Sources**: Your SQL Server database views
         """)
     
-    # Index Selection
-    index_name = st.selectbox(
-        "Select Index",
-        ["NSE 500", "NASDAQ 100", "Forex"],
-        help="Choose which market index to analyze"
-    )
+    # Index and Ticker Selection
+    col1, col2 = st.columns([1, 2])
     
-    # Load data - load ALL stocks (no limit)
+    with col1:
+        index_name = st.selectbox(
+            "Select Index",
+            ["NSE 500", "NASDAQ 100", "Forex"],
+            help="Choose which market index to analyze"
+        )
+    
+    # Load data first to get available tickers
     with st.spinner(f"🛩️ Loading flight status for {index_name}..."):
         df = load_flight_status_data(index_name, limit=None)  # Load all stocks
+    
+    # Ticker filter - only show after data is loaded
+    with col2:
+        if not df.empty:
+            # Get unique tickers from loaded data
+            available_tickers = ['All'] + sorted(df['ticker'].unique().tolist())
+            selected_ticker = st.selectbox(
+                "Select Ticker/Symbol",
+                available_tickers,
+                index=0,
+                help="Filter by specific ticker symbol (default: All)"
+            )
+        else:
+            selected_ticker = 'All'
     
     if df.empty:
         st.error("❌ No data available. Please check your database connection and table structure.")
         return
+    
+    # Apply ticker filter if a specific ticker is selected
+    if selected_ticker != 'All':
+        df = df[df['ticker'] == selected_ticker]
+        if df.empty:
+            st.warning(f"⚠️ No data found for ticker: {selected_ticker}")
+            return
     
     # Summary metrics
     render_flight_status_summary_metrics(df)
@@ -5052,7 +5692,8 @@ def show_nasdaq_ml_predictions_page():
                 if not indicators_df.empty:
                     st.markdown("### 📈 Technical Indicators Analysis")
                     
-                    # Indicators metrics
+                    # Indicators metrics - Traditional Indicators
+                    st.markdown("#### 📊 Traditional Indicators")
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         if 'rsi' in indicators_df.columns:
@@ -5070,6 +5711,34 @@ def show_nasdaq_ml_predictions_page():
                         if 'volume_sma_ratio' in indicators_df.columns:
                             high_volume = len(indicators_df[indicators_df['volume_sma_ratio'] > 1.5])
                             st.metric("High Volume", high_volume)
+                    
+                    # Advanced Indicators metrics
+                    st.markdown("#### 🎯 Advanced Indicators")
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        if 'fib_trade_signal' in indicators_df.columns:
+                            fib_buy = len(indicators_df[indicators_df['fib_trade_signal'].str.contains('BUY', case=False, na=False)])
+                            st.metric("📊 Fibonacci Buy Signals", fib_buy)
+                        else:
+                            st.info("Fibonacci data not available")
+                    with col2:
+                        if 'stoch_trade_signal' in indicators_df.columns:
+                            stoch_buy = len(indicators_df[indicators_df['stoch_trade_signal'].str.contains('BUY', case=False, na=False)])
+                            st.metric("📈 Stochastic Buy Signals", stoch_buy)
+                        else:
+                            st.info("Stochastic data not available")
+                    with col3:
+                        if 'sr_trade_signal' in indicators_df.columns:
+                            sr_buy = len(indicators_df[indicators_df['sr_trade_signal'].str.contains('BUY', case=False, na=False)])
+                            st.metric("📍 S/R Buy Signals", sr_buy)
+                        else:
+                            st.info("S/R data not available")
+                    with col4:
+                        if 'pattern_signal' in indicators_df.columns:
+                            pattern_bullish = len(indicators_df[indicators_df['pattern_signal'].str.contains('BULLISH', case=False, na=False)])
+                            st.metric("🕯️ Bullish Patterns", pattern_bullish)
+                        else:
+                            st.info("Pattern data not available")
                     
                     st.dataframe(indicators_df, use_container_width=True)
                     
@@ -5320,7 +5989,8 @@ def show_nse_ml_predictions_page():
                 if not indicators_df.empty:
                     st.markdown("### 📈 NSE Technical Indicators Analysis")
                     
-                    # Indicators metrics
+                    # Indicators metrics - Traditional Indicators
+                    st.markdown("#### 📊 Traditional Indicators")
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         if 'rsi' in indicators_df.columns:
@@ -5338,10 +6008,37 @@ def show_nse_ml_predictions_page():
                         if 'volume_sma_ratio' in indicators_df.columns:
                             high_volume = len(indicators_df[indicators_df['volume_sma_ratio'] > 1.5])
                             st.metric("High Volume", high_volume)
-                    with col4:
-                        if 'volume_trend' in indicators_df.columns:
+                        elif 'volume_trend' in indicators_df.columns:
                             high_volume = len(indicators_df[indicators_df['volume_trend'].str.contains('HIGH', case=False, na=False)])
                             st.metric("High Volume", high_volume)
+                    
+                    # Advanced Indicators metrics
+                    st.markdown("#### 🎯 Advanced Indicators")
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        if 'fib_trade_signal' in indicators_df.columns:
+                            fib_buy = len(indicators_df[indicators_df['fib_trade_signal'].str.contains('BUY', case=False, na=False)])
+                            st.metric("📊 Fibonacci Buy Signals", fib_buy)
+                        else:
+                            st.info("Fibonacci data not available")
+                    with col2:
+                        if 'stoch_trade_signal' in indicators_df.columns:
+                            stoch_buy = len(indicators_df[indicators_df['stoch_trade_signal'].str.contains('BUY', case=False, na=False)])
+                            st.metric("📈 Stochastic Buy Signals", stoch_buy)
+                        else:
+                            st.info("Stochastic data not available")
+                    with col3:
+                        if 'sr_trade_signal' in indicators_df.columns:
+                            sr_buy = len(indicators_df[indicators_df['sr_trade_signal'].str.contains('BUY', case=False, na=False)])
+                            st.metric("📍 S/R Buy Signals", sr_buy)
+                        else:
+                            st.info("S/R data not available")
+                    with col4:
+                        if 'pattern_signal' in indicators_df.columns:
+                            pattern_bullish = len(indicators_df[indicators_df['pattern_signal'].str.contains('BULLISH', case=False, na=False)])
+                            st.metric("🕯️ Bullish Patterns", pattern_bullish)
+                        else:
+                            st.info("Pattern data not available")
                     
                     st.dataframe(indicators_df, use_container_width=True)
                     
@@ -7093,7 +7790,26 @@ def show_portfolio_tracker():
                 # Display editable transaction history
                 st.markdown("---")
                 st.markdown("#### Edit Transactions")
-                st.info("💡 Edit transactions directly in the table below. Click 'Save Changes' to update the database.")
+                
+                # Clear instructions
+                with st.expander("💡 How to Edit/Delete Transactions", expanded=False):
+                    st.markdown("""
+                    **Editing Transactions:**
+                    1. Click on any cell in the table below to edit its value
+                    2. Click the **Save Changes** button to update the database
+                    
+                    **Deleting Transactions:**
+                    1. Hover over the row number (leftmost column)
+                    2. Click the **trash can icon (🗑️)** that appears
+                    3. The row will be marked for deletion
+                    4. Click **Save Changes** to permanently delete from database
+                    
+                    **Adding New Transactions:**
+                    - Use the "Add Transaction" tab for better data validation
+                    - Or click the **+** icon at the bottom of the table to add a row manually
+                    
+                    ⚠️ **Important**: Changes are not saved until you click the "Save Changes" button!
+                    """)
                 
                 # Make dataframe editable
                 edited_portfolio_df = st.data_editor(
@@ -7116,7 +7832,107 @@ def show_portfolio_tracker():
                     key="portfolio_editor"
                 )
                 
+                # Show changes detected
+                if len(edited_portfolio_df) != len(portfolio_df):
+                    rows_added = max(0, len(edited_portfolio_df) - len(portfolio_df))
+                    rows_deleted = max(0, len(portfolio_df) - len(edited_portfolio_df))
+                    
+                    if rows_deleted > 0:
+                        st.warning(f"⚠️ {rows_deleted} row(s) will be deleted. Click 'Save Changes' to confirm.")
+                    if rows_added > 0:
+                        st.info(f"ℹ️ {rows_added} new row(s) added. Click 'Save Changes' to save.")
+                
+                # Bulk delete option
+                st.markdown("---")
+                st.markdown("#### 🗑️ Bulk Delete Transactions")
+                
+                with st.expander("Delete Multiple Transactions", expanded=False):
+                    st.warning("⚠️ This will permanently delete selected transactions from the database!")
+                    
+                    # Filter options for bulk delete
+                    delete_col1, delete_col2 = st.columns(2)
+                    
+                    with delete_col1:
+                        delete_by = st.radio(
+                            "Delete by:",
+                            ["Select by Ticker", "Select by Status", "Select by Date Range"],
+                            key="delete_by_option"
+                        )
+                    
+                    with delete_col2:
+                        if delete_by == "Select by Ticker":
+                            tickers_to_delete = st.multiselect(
+                                "Select Tickers to Delete",
+                                options=sorted(portfolio_df['ticker'].unique().tolist()),
+                                key="tickers_to_delete"
+                            )
+                            if tickers_to_delete and st.button("🗑️ Delete Selected Tickers", type="secondary"):
+                                try:
+                                    ids_to_delete = portfolio_df[portfolio_df['ticker'].isin(tickers_to_delete)]['id'].tolist()
+                                    if ids_to_delete:
+                                        placeholders = ','.join(['?' for _ in ids_to_delete])
+                                        delete_query = f"DELETE FROM dbo.portfolio_tracker WHERE id IN ({placeholders})"
+                                        cursor.execute(delete_query, ids_to_delete)
+                                        conn.commit()
+                                        st.session_state.portfolio_success = f"✅ Deleted {len(ids_to_delete)} transaction(s) for tickers: {', '.join(tickers_to_delete)}"
+                                        st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error deleting transactions: {e}")
+                        
+                        elif delete_by == "Select by Status":
+                            status_to_delete = st.selectbox(
+                                "Select Status to Delete",
+                                options=["HOLDING", "SOLD"],
+                                key="status_to_delete"
+                            )
+                            matching_count = len(portfolio_df[portfolio_df['status'] == status_to_delete])
+                            st.info(f"This will delete {matching_count} transaction(s) with status '{status_to_delete}'")
+                            
+                            if st.button(f"🗑️ Delete All {status_to_delete} Transactions", type="secondary"):
+                                try:
+                                    ids_to_delete = portfolio_df[portfolio_df['status'] == status_to_delete]['id'].tolist()
+                                    if ids_to_delete:
+                                        placeholders = ','.join(['?' for _ in ids_to_delete])
+                                        delete_query = f"DELETE FROM dbo.portfolio_tracker WHERE id IN ({placeholders})"
+                                        cursor.execute(delete_query, ids_to_delete)
+                                        conn.commit()
+                                        st.session_state.portfolio_success = f"✅ Deleted {len(ids_to_delete)} {status_to_delete} transaction(s)"
+                                        st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error deleting transactions: {e}")
+                        
+                        elif delete_by == "Select by Date Range":
+                            date_col1, date_col2 = st.columns(2)
+                            with date_col1:
+                                start_date = st.date_input("From Date", key="delete_start_date")
+                            with date_col2:
+                                end_date = st.date_input("To Date", key="delete_end_date")
+                            
+                            matching_count = len(portfolio_df[
+                                (portfolio_df['buy_date'] >= pd.Timestamp(start_date)) & 
+                                (portfolio_df['buy_date'] <= pd.Timestamp(end_date))
+                            ])
+                            st.info(f"This will delete {matching_count} transaction(s) between {start_date} and {end_date}")
+                            
+                            if st.button("🗑️ Delete Transactions in Date Range", type="secondary"):
+                                try:
+                                    ids_to_delete = portfolio_df[
+                                        (portfolio_df['buy_date'] >= pd.Timestamp(start_date)) & 
+                                        (portfolio_df['buy_date'] <= pd.Timestamp(end_date))
+                                    ]['id'].tolist()
+                                    
+                                    if ids_to_delete:
+                                        placeholders = ','.join(['?' for _ in ids_to_delete])
+                                        delete_query = f"DELETE FROM dbo.portfolio_tracker WHERE id IN ({placeholders})"
+                                        cursor.execute(delete_query, ids_to_delete)
+                                        conn.commit()
+                                        st.session_state.portfolio_success = f"✅ Deleted {len(ids_to_delete)} transaction(s) from date range"
+                                        st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error deleting transactions: {e}")
+                
                 # Save and Download buttons
+                st.markdown("---")
                 col1, col2, col3 = st.columns([1, 1, 4])
                 with col1:
                     if st.button("💾 Save Changes", type="primary", key="save_portfolio"):
@@ -7186,6 +8002,592 @@ def show_portfolio_tracker():
         st.info("Please check your database connection.")
 
 
+def show_family_assets_page():
+    """For Family - Track family assets and liabilities"""
+    st.markdown("""
+    # 👨‍👩‍👧‍👦 For Family - Assets & Liabilities Tracker
+    
+    ### Keep track of all family assets and liabilities in one place
+    
+    Document important financial information for your family's future planning.
+    
+    ---
+    """)
+    
+    # Create family assets table if not exists
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Create family_assets table if not exists
+        create_table_query = """
+        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='family_assets' AND xtype='U')
+        CREATE TABLE dbo.family_assets (
+            id INT IDENTITY(1,1) PRIMARY KEY,
+            asset_type VARCHAR(50) NOT NULL,
+            item_name VARCHAR(200) NOT NULL,
+            category VARCHAR(100),
+            location_place VARCHAR(500),
+            purchase_date DATE,
+            purchase_value FLOAT,
+            sold_date DATE,
+            sold_value FLOAT,
+            current_status VARCHAR(50) DEFAULT 'ACTIVE',
+            notes VARCHAR(1000),
+            created_date DATETIME DEFAULT GETDATE()
+        )
+        """
+        cursor.execute(create_table_query)
+        conn.commit()
+        
+        # Fetch family assets data
+        query = """
+        SELECT 
+            id,
+            asset_type,
+            item_name,
+            category,
+            location_place,
+            purchase_date,
+            purchase_value,
+            sold_date,
+            sold_value,
+            current_status,
+            notes,
+            created_date
+        FROM dbo.family_assets
+        ORDER BY created_date DESC
+        """
+        
+        assets_df = pd.read_sql(query, conn)
+        
+        # Tabs for different views
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Overview", "➕ Add Asset/Liability", "📋 All Records", "📈 Summary"])
+        
+        with tab1:
+            st.markdown("### Family Assets & Liabilities Overview")
+            
+            if assets_df.empty:
+                st.info("📋 No records yet. Add your first asset or liability in the 'Add Asset/Liability' tab.")
+            else:
+                # Split into assets and liabilities
+                assets_only = assets_df[assets_df['asset_type'] == 'ASSET'].copy()
+                liabilities_only = assets_df[assets_df['asset_type'] == 'LIABILITY'].copy()
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### 💰 Assets")
+                    if assets_only.empty:
+                        st.info("No assets recorded yet.")
+                    else:
+                        active_assets = assets_only[assets_only['current_status'] == 'ACTIVE']
+                        total_asset_value = active_assets['purchase_value'].sum() if not active_assets.empty else 0
+                        st.metric("Total Active Assets", len(active_assets))
+                        st.metric("Total Value", f"${total_asset_value:,.2f}")
+                        
+                        st.markdown("**Recent Assets:**")
+                        for _, asset in assets_only.head(5).iterrows():
+                            status_emoji = "✅" if asset['current_status'] == 'ACTIVE' else "📦"
+                            st.markdown(f"- {status_emoji} **{asset['item_name']}** ({asset['category']}) - ${asset['purchase_value']:,.2f}")
+                
+                with col2:
+                    st.markdown("#### 📉 Liabilities")
+                    if liabilities_only.empty:
+                        st.info("No liabilities recorded yet.")
+                    else:
+                        active_liabilities = liabilities_only[liabilities_only['current_status'] == 'ACTIVE']
+                        total_liability_value = active_liabilities['purchase_value'].sum() if not active_liabilities.empty else 0
+                        st.metric("Total Active Liabilities", len(active_liabilities))
+                        st.metric("Total Amount", f"${total_liability_value:,.2f}")
+                        
+                        st.markdown("**Recent Liabilities:**")
+                        for _, liability in liabilities_only.head(5).iterrows():
+                            status_emoji = "⚠️" if liability['current_status'] == 'ACTIVE' else "✅"
+                            st.markdown(f"- {status_emoji} **{liability['item_name']}** ({liability['category']}) - ${liability['purchase_value']:,.2f}")
+                
+                # Net Worth
+                st.markdown("---")
+                if not assets_only.empty or not liabilities_only.empty:
+                    active_assets = assets_df[assets_df['asset_type'] == 'ASSET'][assets_df['current_status'] == 'ACTIVE']
+                    active_liabilities = assets_df[assets_df['asset_type'] == 'LIABILITY'][assets_df['current_status'] == 'ACTIVE']
+                    
+                    total_assets = active_assets['purchase_value'].sum() if not active_assets.empty else 0
+                    total_liabilities = active_liabilities['purchase_value'].sum() if not active_liabilities.empty else 0
+                    net_worth = total_assets - total_liabilities
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total Assets", f"${total_assets:,.2f}")
+                    with col2:
+                        st.metric("Total Liabilities", f"${total_liabilities:,.2f}")
+                    with col3:
+                        st.metric("Net Worth", f"${net_worth:,.2f}", delta=None if net_worth >= 0 else "Negative")
+        
+        with tab2:
+            st.markdown("### Add New Asset or Liability")
+            
+            with st.form("add_family_asset_form"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    asset_type = st.selectbox(
+                        "Type*",
+                        ["ASSET", "LIABILITY"],
+                        help="Select whether this is an asset or liability"
+                    )
+                    
+                    item_name = st.text_input(
+                        "Item Name*",
+                        placeholder="e.g., House, Car, Credit Card, Property"
+                    )
+                    
+                    category = st.selectbox(
+                        "Category*",
+                        ["Real Estate", "Vehicle", "Investment", "Jewelry", "Electronics", 
+                         "Furniture", "Loan", "Credit Card", "Mortgage", "Personal Loan", "Other"],
+                        help="Select the category that best fits this item"
+                    )
+                    
+                    location_place = st.text_area(
+                        "Location/Place",
+                        placeholder="e.g., 123 Main St, New York, NY or Bank Name, Account Number"
+                    )
+                    
+                    purchase_date = st.date_input(
+                        "Purchase/Start Date*",
+                        help="Date when acquired or loan started"
+                    )
+                    
+                    purchase_value = st.number_input(
+                        "Purchase/Original Value*",
+                        min_value=0.0,
+                        step=100.0,
+                        help="Original value or loan amount"
+                    )
+                
+                with col2:
+                    current_status = st.selectbox(
+                        "Current Status*",
+                        ["ACTIVE", "SOLD", "PAID_OFF", "INACTIVE"],
+                        help="Current status of this item"
+                    )
+                    
+                    # Sold/Paid off details
+                    if current_status in ["SOLD", "PAID_OFF"]:
+                        sold_date = st.date_input(
+                            "Sold/Paid Off Date",
+                            help="Date when sold or paid off"
+                        )
+                        sold_value = st.number_input(
+                            "Sold/Final Value",
+                            min_value=0.0,
+                            step=100.0,
+                            help="Final sale value or remaining balance"
+                        )
+                    else:
+                        sold_date = None
+                        sold_value = None
+                    
+                    notes = st.text_area(
+                        "Notes",
+                        placeholder="Additional information, documents location, insurance details, etc.",
+                        height=200
+                    )
+                
+                submitted = st.form_submit_button("💾 Add Record", type="primary")
+                
+                if submitted:
+                    if not item_name or not category or not purchase_date or purchase_value <= 0:
+                        st.error("❌ Please fill all required fields marked with *")
+                    else:
+                        try:
+                            insert_query = """
+                            INSERT INTO dbo.family_assets 
+                            (asset_type, item_name, category, location_place, purchase_date, 
+                             purchase_value, sold_date, sold_value, current_status, notes)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """
+                            cursor.execute(insert_query, 
+                                         (asset_type, item_name, category, location_place, purchase_date,
+                                          purchase_value, sold_date, sold_value, current_status, notes))
+                            conn.commit()
+                            
+                            st.session_state.family_success = f"✅ Successfully added {asset_type.lower()}: {item_name}!"
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error adding record: {e}")
+            
+            # Display success message if it exists
+            if 'family_success' in st.session_state:
+                st.success(st.session_state.family_success)
+                st.balloons()
+                del st.session_state.family_success
+        
+        with tab3:
+            st.markdown("### All Assets & Liabilities Records")
+            
+            if assets_df.empty:
+                st.info("📋 No records yet.")
+            else:
+                # Filter options
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    filter_type = st.selectbox("Filter by Type", ["All", "ASSET", "LIABILITY"])
+                with col2:
+                    filter_status = st.selectbox("Filter by Status", ["All", "ACTIVE", "SOLD", "PAID_OFF", "INACTIVE"])
+                with col3:
+                    filter_category = st.selectbox(
+                        "Filter by Category",
+                        ["All"] + sorted(assets_df['category'].dropna().unique().tolist())
+                    )
+                
+                # Apply filters
+                filtered_df = assets_df.copy()
+                if filter_type != "All":
+                    filtered_df = filtered_df[filtered_df['asset_type'] == filter_type]
+                if filter_status != "All":
+                    filtered_df = filtered_df[filtered_df['current_status'] == filter_status]
+                if filter_category != "All":
+                    filtered_df = filtered_df[filtered_df['category'] == filter_category]
+                
+                st.markdown(f"**Showing {len(filtered_df)} of {len(assets_df)} records**")
+                
+                # Editable dataframe
+                st.markdown("---")
+                st.markdown("#### Edit Records")
+                
+                with st.expander("💡 How to Edit/Delete Records", expanded=False):
+                    st.markdown("""
+                    **Editing:**
+                    1. Click on any cell to edit its value
+                    2. Click 'Save Changes' to update database
+                    
+                    **Deleting:**
+                    1. Hover over row number (leftmost column)
+                    2. Click trash icon (🗑️)
+                    3. Click 'Save Changes' to confirm deletion
+                    """)
+                
+                edited_df = st.data_editor(
+                    filtered_df,
+                    use_container_width=True,
+                    num_rows="dynamic",
+                    column_config={
+                        "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
+                        "asset_type": st.column_config.SelectboxColumn("Type", options=["ASSET", "LIABILITY"], width="small"),
+                        "item_name": st.column_config.TextColumn("Item Name", width="medium"),
+                        "category": st.column_config.TextColumn("Category", width="medium"),
+                        "location_place": st.column_config.TextColumn("Location/Place", width="large"),
+                        "purchase_date": st.column_config.DateColumn("Purchase Date"),
+                        "purchase_value": st.column_config.NumberColumn("Purchase Value", format="$%.2f"),
+                        "sold_date": st.column_config.DateColumn("Sold Date"),
+                        "sold_value": st.column_config.NumberColumn("Sold Value", format="$%.2f"),
+                        "current_status": st.column_config.SelectboxColumn(
+                            "Status",
+                            options=["ACTIVE", "SOLD", "PAID_OFF", "INACTIVE"],
+                            width="small"
+                        ),
+                        "notes": st.column_config.TextColumn("Notes", width="large"),
+                        "created_date": st.column_config.DatetimeColumn("Created", disabled=True)
+                    },
+                    key="family_assets_editor"
+                )
+                
+                # Show changes detected
+                if len(edited_df) != len(filtered_df):
+                    rows_added = max(0, len(edited_df) - len(filtered_df))
+                    rows_deleted = max(0, len(filtered_df) - len(edited_df))
+                    
+                    if rows_deleted > 0:
+                        st.warning(f"⚠️ {rows_deleted} row(s) will be deleted. Click 'Save Changes' to confirm.")
+                    if rows_added > 0:
+                        st.info(f"ℹ️ {rows_added} new row(s) added. Click 'Save Changes' to save.")
+                
+                # Bulk delete option
+                st.markdown("---")
+                st.markdown("#### 🗑️ Bulk Delete Records")
+                
+                with st.expander("Delete Multiple Records", expanded=False):
+                    st.warning("⚠️ This will permanently delete selected records from the database!")
+                    
+                    # Filter options for bulk delete
+                    delete_col1, delete_col2 = st.columns(2)
+                    
+                    with delete_col1:
+                        delete_by = st.radio(
+                            "Delete by:",
+                            ["Select by ID", "Select by Item", "Select by Type", "Select by Status", "Select by Category"],
+                            key="family_delete_by_option"
+                        )
+                    
+                    with delete_col2:
+                        if delete_by == "Select by ID":
+                            # Show available IDs with item names for reference
+                            st.markdown("**Available IDs:**")
+                            id_reference = assets_df[['id', 'item_name', 'asset_type', 'category']].copy()
+                            st.dataframe(
+                                id_reference,
+                                use_container_width=True,
+                                height=200,
+                                column_config={
+                                    "id": "ID",
+                                    "item_name": "Item Name",
+                                    "asset_type": "Type",
+                                    "category": "Category"
+                                }
+                            )
+                            
+                            ids_to_delete_input = st.text_input(
+                                "Enter IDs to Delete (comma-separated)",
+                                placeholder="e.g., 1, 5, 12",
+                                key="family_ids_to_delete",
+                                help="Enter one or more ID numbers separated by commas"
+                            )
+                            
+                            if ids_to_delete_input and st.button("🗑️ Delete Selected IDs", type="secondary", key="delete_ids_btn"):
+                                try:
+                                    # Parse comma-separated IDs
+                                    ids_to_delete = [int(id.strip()) for id in ids_to_delete_input.split(',') if id.strip().isdigit()]
+                                    
+                                    if not ids_to_delete:
+                                        st.error("❌ Please enter valid ID numbers")
+                                    else:
+                                        # Verify IDs exist in database
+                                        valid_ids = assets_df[assets_df['id'].isin(ids_to_delete)]['id'].tolist()
+                                        invalid_ids = [id for id in ids_to_delete if id not in valid_ids]
+                                        
+                                        if invalid_ids:
+                                            st.warning(f"⚠️ IDs not found: {', '.join(map(str, invalid_ids))}")
+                                        
+                                        if valid_ids:
+                                            # Get item names for confirmation message
+                                            deleted_items = assets_df[assets_df['id'].isin(valid_ids)]['item_name'].tolist()
+                                            
+                                            placeholders = ','.join(['?' for _ in valid_ids])
+                                            delete_query = f"DELETE FROM dbo.family_assets WHERE id IN ({placeholders})"
+                                            cursor.execute(delete_query, valid_ids)
+                                            conn.commit()
+                                            st.session_state.family_success = f"✅ Deleted {len(valid_ids)} record(s) (IDs: {', '.join(map(str, valid_ids))}): {', '.join(deleted_items)}"
+                                            st.rerun()
+                                except ValueError:
+                                    st.error("❌ Please enter valid numeric IDs separated by commas")
+                                except Exception as e:
+                                    st.error(f"❌ Error deleting records: {e}")
+                        
+                        elif delete_by == "Select by Item":
+                            items_to_delete = st.multiselect(
+                                "Select Items to Delete",
+                                options=sorted(assets_df['item_name'].unique().tolist()),
+                                key="family_items_to_delete"
+                            )
+                            if items_to_delete and st.button("🗑️ Delete Selected Items", type="secondary", key="delete_items_btn"):
+                                try:
+                                    ids_to_delete = assets_df[assets_df['item_name'].isin(items_to_delete)]['id'].tolist()
+                                    if ids_to_delete:
+                                        placeholders = ','.join(['?' for _ in ids_to_delete])
+                                        delete_query = f"DELETE FROM dbo.family_assets WHERE id IN ({placeholders})"
+                                        cursor.execute(delete_query, ids_to_delete)
+                                        conn.commit()
+                                        st.session_state.family_success = f"✅ Deleted {len(ids_to_delete)} record(s): {', '.join(items_to_delete)}"
+                                        st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error deleting records: {e}")
+                        
+                        elif delete_by == "Select by Type":
+                            type_to_delete = st.selectbox(
+                                "Select Type to Delete",
+                                options=["ASSET", "LIABILITY"],
+                                key="family_type_to_delete"
+                            )
+                            matching_count = len(assets_df[assets_df['asset_type'] == type_to_delete])
+                            st.info(f"This will delete {matching_count} record(s) of type '{type_to_delete}'")
+                            
+                            if st.button(f"🗑️ Delete All {type_to_delete}s", type="secondary", key="delete_type_btn"):
+                                try:
+                                    ids_to_delete = assets_df[assets_df['asset_type'] == type_to_delete]['id'].tolist()
+                                    if ids_to_delete:
+                                        placeholders = ','.join(['?' for _ in ids_to_delete])
+                                        delete_query = f"DELETE FROM dbo.family_assets WHERE id IN ({placeholders})"
+                                        cursor.execute(delete_query, ids_to_delete)
+                                        conn.commit()
+                                        st.session_state.family_success = f"✅ Deleted {len(ids_to_delete)} {type_to_delete} record(s)"
+                                        st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error deleting records: {e}")
+                        
+                        elif delete_by == "Select by Status":
+                            status_to_delete = st.selectbox(
+                                "Select Status to Delete",
+                                options=["ACTIVE", "SOLD", "PAID_OFF", "INACTIVE"],
+                                key="family_status_to_delete"
+                            )
+                            matching_count = len(assets_df[assets_df['current_status'] == status_to_delete])
+                            st.info(f"This will delete {matching_count} record(s) with status '{status_to_delete}'")
+                            
+                            if st.button(f"🗑️ Delete All {status_to_delete} Records", type="secondary", key="delete_status_btn"):
+                                try:
+                                    ids_to_delete = assets_df[assets_df['current_status'] == status_to_delete]['id'].tolist()
+                                    if ids_to_delete:
+                                        placeholders = ','.join(['?' for _ in ids_to_delete])
+                                        delete_query = f"DELETE FROM dbo.family_assets WHERE id IN ({placeholders})"
+                                        cursor.execute(delete_query, ids_to_delete)
+                                        conn.commit()
+                                        st.session_state.family_success = f"✅ Deleted {len(ids_to_delete)} {status_to_delete} record(s)"
+                                        st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error deleting records: {e}")
+                        
+                        elif delete_by == "Select by Category":
+                            category_to_delete = st.selectbox(
+                                "Select Category to Delete",
+                                options=sorted(assets_df['category'].dropna().unique().tolist()),
+                                key="family_category_to_delete"
+                            )
+                            matching_count = len(assets_df[assets_df['category'] == category_to_delete])
+                            st.info(f"This will delete {matching_count} record(s) in category '{category_to_delete}'")
+                            
+                            if st.button(f"🗑️ Delete All '{category_to_delete}' Records", type="secondary", key="delete_category_btn"):
+                                try:
+                                    ids_to_delete = assets_df[assets_df['category'] == category_to_delete]['id'].tolist()
+                                    if ids_to_delete:
+                                        placeholders = ','.join(['?' for _ in ids_to_delete])
+                                        delete_query = f"DELETE FROM dbo.family_assets WHERE id IN ({placeholders})"
+                                        cursor.execute(delete_query, ids_to_delete)
+                                        conn.commit()
+                                        st.session_state.family_success = f"✅ Deleted {len(ids_to_delete)} record(s) from category '{category_to_delete}'"
+                                        st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error deleting records: {e}")
+                
+                # Save and export buttons
+                st.markdown("---")
+                col1, col2, col3 = st.columns([1, 1, 4])
+                
+                with col1:
+                    if st.button("💾 Save Changes", type="primary", key="save_family_assets"):
+                        try:
+                            connection_string = get_connection_pool()
+                            conn_update = pyodbc.connect(connection_string)
+                            conn_update.autocommit = False
+                            cursor_update = conn_update.cursor()
+                            
+                            cursor_update.execute("DELETE FROM dbo.family_assets")
+                            
+                            for _, row in edited_df.iterrows():
+                                purchase_date_val = row['purchase_date'].date() if pd.notna(row['purchase_date']) and hasattr(row['purchase_date'], 'date') else row['purchase_date'] if pd.notna(row['purchase_date']) else None
+                                sold_date_val = row['sold_date'].date() if pd.notna(row['sold_date']) and hasattr(row['sold_date'], 'date') else row['sold_date'] if pd.notna(row['sold_date']) else None
+                                
+                                insert_query = """
+                                INSERT INTO dbo.family_assets 
+                                (asset_type, item_name, category, location_place, purchase_date, 
+                                 purchase_value, sold_date, sold_value, current_status, notes)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """
+                                cursor_update.execute(insert_query,
+                                    (row['asset_type'], row['item_name'], row['category'],
+                                     row['location_place'] if pd.notna(row['location_place']) else None,
+                                     purchase_date_val,
+                                     row['purchase_value'] if pd.notna(row['purchase_value']) else None,
+                                     sold_date_val,
+                                     row['sold_value'] if pd.notna(row['sold_value']) else None,
+                                     row['current_status'],
+                                     row['notes'] if pd.notna(row['notes']) else None))
+                            
+                            conn_update.commit()
+                            conn_update.close()
+                            
+                            st.session_state.family_success = f"✅ Successfully updated {len(edited_df)} records!"
+                            st.rerun()
+                        except Exception as e:
+                            if conn_update:
+                                try:
+                                    conn_update.rollback()
+                                    conn_update.close()
+                                except:
+                                    pass
+                            st.error(f"❌ Error saving changes: {e}")
+                
+                with col2:
+                    if st.button("🔄 Refresh"):
+                        st.rerun()
+                
+                with col3:
+                    st.download_button(
+                        label="📥 Download CSV",
+                        data=filtered_df.to_csv(index=False),
+                        file_name=f"family_assets_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+        
+        with tab4:
+            st.markdown("### Summary & Analytics")
+            
+            if assets_df.empty:
+                st.info("📋 No data available for summary.")
+            else:
+                # Category breakdown
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### Assets by Category")
+                    assets_only = assets_df[assets_df['asset_type'] == 'ASSET']
+                    if not assets_only.empty:
+                        category_summary = assets_only.groupby('category')['purchase_value'].agg(['sum', 'count']).reset_index()
+                        category_summary.columns = ['Category', 'Total Value', 'Count']
+                        category_summary = category_summary.sort_values('Total Value', ascending=False)
+                        
+                        st.dataframe(
+                            category_summary,
+                            use_container_width=True,
+                            column_config={
+                                "Total Value": st.column_config.NumberColumn("Total Value", format="$%.2f")
+                            }
+                        )
+                    else:
+                        st.info("No assets to summarize.")
+                
+                with col2:
+                    st.markdown("#### Liabilities by Category")
+                    liabilities_only = assets_df[assets_df['asset_type'] == 'LIABILITY']
+                    if not liabilities_only.empty:
+                        category_summary = liabilities_only.groupby('category')['purchase_value'].agg(['sum', 'count']).reset_index()
+                        category_summary.columns = ['Category', 'Total Value', 'Count']
+                        category_summary = category_summary.sort_values('Total Value', ascending=False)
+                        
+                        st.dataframe(
+                            category_summary,
+                            use_container_width=True,
+                            column_config={
+                                "Total Value": st.column_config.NumberColumn("Total Value", format="$%.2f")
+                            }
+                        )
+                    else:
+                        st.info("No liabilities to summarize.")
+                
+                # Status breakdown
+                st.markdown("---")
+                st.markdown("#### Status Breakdown")
+                
+                status_df = assets_df.groupby(['asset_type', 'current_status'])['purchase_value'].agg(['sum', 'count']).reset_index()
+                status_df.columns = ['Type', 'Status', 'Total Value', 'Count']
+                
+                st.dataframe(
+                    status_df,
+                    use_container_width=True,
+                    column_config={
+                        "Total Value": st.column_config.NumberColumn("Total Value", format="$%.2f")
+                    }
+                )
+        
+        conn.close()
+        
+    except Exception as e:
+        st.error(f"❌ Error loading family assets tracker: {e}")
+        st.info("Please check your database connection.")
+
+
 # Main application routing
 if page == "🏠 Home & Filters":
     show_home_page()
@@ -7211,7 +8613,8 @@ elif page == "📊 Master Data Editor":
     show_master_data_editor()
 elif page == "💼 My Portfolio Tracker":
     show_portfolio_tracker()
-
+elif page == "👨‍👩‍👧‍👦 For Family":
+    show_family_assets_page()
 elif page == "🤖 AI Trading Signals Scanner":
     show_ai_trading_signals_scanner()
 
