@@ -285,24 +285,24 @@ GO
 CREATE VIEW dbo.forex_support_resistance AS
 WITH PriceData AS (
     SELECT 
-        ticker,
+        symbol as ticker,  -- Use symbol column for Forex
         trading_date,
         CAST(open_price AS FLOAT) as open_price,
         CAST(high_price AS FLOAT) as high_price,
         CAST(low_price AS FLOAT) as low_price,
         CAST(close_price AS FLOAT) as close_price,
         volume,
-        LAG(CAST(high_price AS FLOAT), 1) OVER (PARTITION BY ticker ORDER BY trading_date) as prev_high,
-        LAG(CAST(low_price AS FLOAT), 1) OVER (PARTITION BY ticker ORDER BY trading_date) as prev_low,
-        LAG(CAST(close_price AS FLOAT), 1) OVER (PARTITION BY ticker ORDER BY trading_date) as prev_close,
-        MAX(CAST(high_price AS FLOAT)) OVER (PARTITION BY ticker ORDER BY trading_date ROWS BETWEEN 20 PRECEDING AND CURRENT ROW) as high_20d,
-        MIN(CAST(low_price AS FLOAT)) OVER (PARTITION BY ticker ORDER BY trading_date ROWS BETWEEN 20 PRECEDING AND CURRENT ROW) as low_20d,
-        MAX(CAST(high_price AS FLOAT)) OVER (PARTITION BY ticker ORDER BY trading_date ROWS BETWEEN 50 PRECEDING AND CURRENT ROW) as high_50d,
-        MIN(CAST(low_price AS FLOAT)) OVER (PARTITION BY ticker ORDER BY trading_date ROWS BETWEEN 50 PRECEDING AND CURRENT ROW) as low_50d,
-        AVG(CAST(close_price AS FLOAT)) OVER (PARTITION BY ticker ORDER BY trading_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) as sma_20,
-        AVG(CAST(close_price AS FLOAT)) OVER (PARTITION BY ticker ORDER BY trading_date ROWS BETWEEN 49 PRECEDING AND CURRENT ROW) as sma_50,
-        AVG(CAST(close_price AS FLOAT)) OVER (PARTITION BY ticker ORDER BY trading_date ROWS BETWEEN 199 PRECEDING AND CURRENT ROW) as sma_200
-    FROM dbo.forex_historical_prices
+        LAG(CAST(high_price AS FLOAT), 1) OVER (PARTITION BY symbol ORDER BY trading_date) as prev_high,
+        LAG(CAST(low_price AS FLOAT), 1) OVER (PARTITION BY symbol ORDER BY trading_date) as prev_low,
+        LAG(CAST(close_price AS FLOAT), 1) OVER (PARTITION BY symbol ORDER BY trading_date) as prev_close,
+        MAX(CAST(high_price AS FLOAT)) OVER (PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 20 PRECEDING AND CURRENT ROW) as high_20d,
+        MIN(CAST(low_price AS FLOAT)) OVER (PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 20 PRECEDING AND CURRENT ROW) as low_20d,
+        MAX(CAST(high_price AS FLOAT)) OVER (PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 50 PRECEDING AND CURRENT ROW) as high_50d,
+        MIN(CAST(low_price AS FLOAT)) OVER (PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 50 PRECEDING AND CURRENT ROW) as low_50d,
+        AVG(CAST(close_price AS FLOAT)) OVER (PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) as sma_20,
+        AVG(CAST(close_price AS FLOAT)) OVER (PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 49 PRECEDING AND CURRENT ROW) as sma_50,
+        AVG(CAST(close_price AS FLOAT)) OVER (PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 199 PRECEDING AND CURRENT ROW) as sma_200
+    FROM dbo.forex_hist_data
     WHERE close_price IS NOT NULL
 ),
 PivotPoints AS (

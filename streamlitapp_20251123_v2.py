@@ -298,13 +298,10 @@ def load_fibonacci(index_name: str, ticker: str) -> pd.DataFrame:
     """Load Fibonacci retracement and extension levels"""
     if index_name == 'NSE 500':
         view = 'nse_500_fibonacci'
-        ticker_col = 'ticker'
     elif index_name == 'Forex':
         view = 'forex_fibonacci'
-        ticker_col = 'symbol'
     else:
         view = 'nasdaq_100_fibonacci'
-        ticker_col = 'ticker'
         
     q = f"""SELECT trading_date, close_price,
                    fib_20d_0236, fib_20d_0382, fib_20d_0500, fib_20d_0618, fib_20d_0786,
@@ -312,7 +309,7 @@ def load_fibonacci(index_name: str, ticker: str) -> pd.DataFrame:
                    fib_20d_ext_1272, fib_20d_ext_1618, fib_20d_ext_2000,
                    fib_trade_signal, fib_position
             FROM dbo.{view}
-            WHERE {ticker_col} = ?
+            WHERE ticker = ?
             ORDER BY trading_date"""
     df = execute_query_safe(q, params=[ticker])
     if not df.empty:
@@ -325,13 +322,10 @@ def load_stochastic(index_name: str, ticker: str) -> pd.DataFrame:
     """Load Stochastic oscillator indicators"""
     if index_name == 'NSE 500':
         view = 'nse_500_stochastic'
-        ticker_col = 'ticker'
     elif index_name == 'Forex':
         view = 'forex_stochastic'
-        ticker_col = 'symbol'
     else:
         view = 'nasdaq_100_stochastic'
-        ticker_col = 'ticker'
         
     q = f"""SELECT trading_date, close_price,
                    stoch_5d_k, stoch_5d_d,
@@ -339,7 +333,7 @@ def load_stochastic(index_name: str, ticker: str) -> pd.DataFrame:
                    stoch_21d_k, stoch_21d_d,
                    stoch_crossover, stoch_status, stoch_trade_signal
             FROM dbo.{view}
-            WHERE {ticker_col} = ?
+            WHERE ticker = ?
             ORDER BY trading_date"""
     df = execute_query_safe(q, params=[ticker])
     if not df.empty:
@@ -352,13 +346,10 @@ def load_support_resistance(index_name: str, ticker: str) -> pd.DataFrame:
     """Load Support & Resistance levels"""
     if index_name == 'NSE 500':
         view = 'nse_500_support_resistance'
-        ticker_col = 'ticker'
     elif index_name == 'Forex':
         view = 'forex_support_resistance'
-        ticker_col = 'symbol'
     else:
         view = 'nasdaq_100_support_resistance'
-        ticker_col = 'ticker'
         
     q = f"""SELECT trading_date, close_price,
                    pivot_point, r1, r2, r3,
@@ -366,7 +357,7 @@ def load_support_resistance(index_name: str, ticker: str) -> pd.DataFrame:
                    swing_high_20d, swing_low_20d,
                    sr_trade_signal, pivot_status
             FROM dbo.{view}
-            WHERE {ticker_col} = ?
+            WHERE ticker = ?
             ORDER BY trading_date"""
     df = execute_query_safe(q, params=[ticker])
     if not df.empty:
@@ -379,13 +370,10 @@ def load_candlestick_patterns(index_name: str, ticker: str) -> pd.DataFrame:
     """Load Candlestick pattern detection"""
     if index_name == 'NSE 500':
         view = 'nse_500_patterns'
-        ticker_col = 'ticker'
     elif index_name == 'Forex':
         view = 'forex_patterns'
-        ticker_col = 'symbol'
     else:
         view = 'nasdaq_100_patterns'
-        ticker_col = 'ticker'
         
     q = f"""SELECT trading_date, close_price,
                    doji, hammer, shooting_star,
@@ -396,7 +384,7 @@ def load_candlestick_patterns(index_name: str, ticker: str) -> pd.DataFrame:
                    head_and_shoulders, inverse_head_shoulders,
                    patterns_detected, pattern_signal
             FROM dbo.{view}
-            WHERE {ticker_col} = ?
+            WHERE ticker = ?
             ORDER BY trading_date"""
     df = execute_query_safe(q, params=[ticker])
     if not df.empty:
@@ -5192,6 +5180,53 @@ def show_ml_prediction_page():
         if train_model_with_progress("Prophet (Time Series)", train_prophet, (completed_models + 1) / total_models):
             completed_models += 1
     
+    # Classification Models (Buy/Sell/Hold)
+    if model_type == "Classification (Buy/Sell/Hold)":
+        # Create classification labels: BUY (>2%), SELL (<-2%), HOLD (between)
+        y_train_class = np.where(y_train > 0.02, 1, np.where(y_train < -0.02, -1, 0))  # 1=BUY, -1=SELL, 0=HOLD
+        y_test_class = np.where(y_test > 0.02, 1, np.where(y_test < -0.02, -1, 0))
+        
+        # Random Forest Classifier
+        def train_rf_class():
+            from sklearn.ensemble import RandomForestClassifier
+            model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=10, n_jobs=-1)
+            model.fit(X_train_standard, y_train_class)
+            pred_class = model.predict(X_test_standard)
+            
+            # Convert predictions back to return estimates
+            pred = np.where(pred_class == 1, 0.03, np.where(pred_class == -1, -0.03, 0.0))
+            
+            info = {
+                "n_estimators": 100,
+                "max_depth": 10,
+                "classification_report": classification_report(y_test_class, pred_class, zero_division=0)
+            }
+            return model, pred, info
+        
+        if train_model_with_progress("RF Classifier", train_rf_class, (completed_models + 1) / total_models):
+            completed_models += 1
+        
+        # Gradient Boosting Classifier
+        def train_gb_class():
+            from sklearn.ensemble import GradientBoostingClassifier
+            model = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42)
+            model.fit(X_train_standard, y_train_class)
+            pred_class = model.predict(X_test_standard)
+            
+            # Convert predictions back to return estimates
+            pred = np.where(pred_class == 1, 0.03, np.where(pred_class == -1, -0.03, 0.0))
+            
+            info = {
+                "n_estimators": 100,
+                "learning_rate": 0.1,
+                "max_depth": 5,
+                "classification_report": classification_report(y_test_class, pred_class, zero_division=0)
+            }
+            return model, pred, info
+        
+        if train_model_with_progress("GB Classifier", train_gb_class, (completed_models + 1) / total_models):
+            completed_models += 1
+    
     # Complete progress
     progress_bar.progress(1.0)
     status_text.text("Training complete!")
@@ -5253,14 +5288,20 @@ def show_ml_prediction_page():
     
     with col1:
         st.markdown("#### 📊 Current Price")
-        st.metric("Current Price", f"${current_price:.2f}")
+        # Use 5 decimal places for Forex, 2 for stocks
+        price_format = f"${current_price:.5f}" if index_option == "Forex" else f"${current_price:.2f}"
+        st.metric("Current Price", price_format)
         
     with col2:
         st.markdown("#### 🎯 Predicted Change")
         if model_type == "Ensemble" and 'Ensemble' in future_predictions:
             pred_change = future_predictions['Ensemble']
-        else:
+        elif len(future_predictions) > 0:
             pred_change = list(future_predictions.values())[0]
+        else:
+            # Handle case where no predictions are available
+            pred_change = 0.0
+            st.warning("No predictions available. Please train a model first.")
         
         direction = "📈" if pred_change > 0 else "📉"
         st.metric(f"{prediction_days}-day Return", f"{direction} {pred_change*100:.2f}%")
@@ -5269,7 +5310,14 @@ def show_ml_prediction_page():
         st.markdown("#### 💰 Target Price")
         target_price = current_price * (1 + pred_change)
         price_diff = target_price - current_price
-        st.metric("Target Price", f"${target_price:.2f}", f"${price_diff:+.2f}")
+        # Use 5 decimal places for Forex, 2 for stocks
+        target_format = f"${target_price:.5f}" if index_option == "Forex" else f"${target_price:.2f}"
+        # Format difference - remove $ sign to let Streamlit handle the color based on +/- value
+        if index_option == "Forex":
+            diff_format = f"{price_diff:+.5f}"
+        else:
+            diff_format = f"{price_diff:+.2f}"
+        st.metric("Target Price", target_format, diff_format)
     
     # Prediction confidence and risk assessment
     st.markdown("### ⚠️ Risk Assessment & Confidence")
