@@ -2,7 +2,7 @@
 REM Flight Status Dashboard - Complete Integration Test & Launcher
 echo 🛩️ Flight Status Dashboard - Integration Complete!
 echo ========================================================
-cd /d "c:\Users\sreea\OneDrive\Documents\stockanalysis\agentai_yfinance"
+cd /d "c:\Users\sreea\OneDrive\Desktop\streamlit-trading-dashboard"
 
 echo 📍 Current directory: %CD%
 echo.

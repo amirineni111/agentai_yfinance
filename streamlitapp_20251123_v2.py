@@ -29,11 +29,14 @@ st.set_page_config(
 @st.cache_resource
 def get_connection_pool():
     """Create a connection pool to manage database connections more efficiently"""
+    # SQL Server Authentication for remote access
+    # Works from any machine on the same network
     connection_string = (
         'DRIVER={ODBC Driver 17 for SQL Server};'
-        'SERVER=localhost\\MSSQLSERVER01;'
+        'SERVER=localhost\\MSSQLSERVER01;'  # Use 192.168.87.27\\MSSQLSERVER01 for remote access
         'DATABASE=stockdata_db;'
-        'Trusted_Connection=yes;'
+        'UID=remote_user;'  # SQL Server authentication
+        'PWD=YourStrongPassword123!;'  # SQL Server password
         'MARS_Connection=yes;'  # Enable Multiple Active Result Sets
         'Connection Timeout=900;'  # 15 minutes for large queries
         'Command Timeout=900;'  # 15 minutes for large queries
