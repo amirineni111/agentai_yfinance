@@ -3232,6 +3232,29 @@ page = st.sidebar.radio(
 
 st.sidebar.markdown("---")
 
+# Quick links to open pages in new tab
+with st.sidebar.expander("🔗 Open in New Tab", expanded=False):
+    st.markdown("""**Right-click links below → "Open in new tab"**  
+    *Keep multiple pages open simultaneously!*""")
+    
+    st.markdown("")
+    
+    base_url = "http://localhost:8501"
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"[📝 Notes]({base_url}/?page=Stock_Notes_Journal)")
+        st.markdown(f"[📈 Analysis]({base_url}/?page=Technical_Analysis)")
+        st.markdown(f"[🤖 AI Pred.]({base_url}/?page=AI_Price_Predictions)")
+        st.markdown(f"[💼 Portfolio]({base_url}/?page=My_Portfolio_Tracker)")
+    with col2:
+        st.markdown(f"[🤖 Signals]({base_url}/?page=AI_Trading_Signals_Scanner)")
+        st.markdown(f"[🛩️ Flight]({base_url}/?page=Flight_Status_Dashboard)")
+        st.markdown(f"[📋 Tables]({base_url}/?page=Data_Table_format)")
+        st.markdown(f"[🏠 Home]({base_url}/?page=Home_Filters)")
+
+st.sidebar.markdown("---")
+
 # Store page selection in session state for use in page functions
 st.session_state.selected_page = page
 
@@ -8065,64 +8088,89 @@ def show_portfolio_tracker():
 
 def quick_add_note_widget(ticker: str, market: str):
     """Quick note widget to add from any page"""
-    with st.expander(f"📝 Quick Add Note for {ticker}", expanded=False):
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            note_type = st.selectbox(
-                "Note Type",
-                ["General", "Buy Signal", "Sell Signal", "Technical Analysis", 
-                 "Fundamental Analysis", "News/Event", "Risk Warning", "Profit/Loss Review"],
-                key=f"quick_note_type_{ticker}"
+    col1, col2 = st.columns([4, 1])
+    
+    with col1:
+        with st.expander(f"📝 Quick Add Note for {ticker}", expanded=False):
+            col_a, col_b = st.columns([2, 1])
+            
+            with col_a:
+                note_type = st.selectbox(
+                    "Note Type",
+                    ["General", "Buy Signal", "Sell Signal", "Technical Analysis", 
+                     "Fundamental Analysis", "News/Event", "Risk Warning", "Profit/Loss Review"],
+                    key=f"quick_note_type_{ticker}"
+                )
+            
+            with col_b:
+                note_date = st.date_input(
+                    "Date",
+                    value=datetime.now(),
+                    key=f"quick_note_date_{ticker}"
+                )
+            
+            note_title = st.text_input(
+                "Title (Optional)",
+                placeholder="Brief summary...",
+                key=f"quick_note_title_{ticker}"
             )
-        
-        with col2:
-            note_date = st.date_input(
-                "Date",
-                value=datetime.now(),
-                key=f"quick_note_date_{ticker}"
+            
+            note_text = st.text_area(
+                "Your Notes",
+                placeholder="Enter your analysis, observations, or decisions...",
+                height=150,
+                key=f"quick_note_text_{ticker}"
             )
-        
-        note_title = st.text_input(
-            "Title (Optional)",
-            placeholder="Brief summary...",
-            key=f"quick_note_title_{ticker}"
-        )
-        
-        note_text = st.text_area(
-            "Your Notes",
-            placeholder="Enter your analysis, observations, or decisions...",
-            height=150,
-            key=f"quick_note_text_{ticker}"
-        )
-        
-        if st.button(f"💾 Save Note for {ticker}", type="primary", key=f"save_note_{ticker}"):
-            if note_text.strip():
-                try:
-                    conn = get_connection()
-                    cursor = conn.cursor()
-                    
-                    insert_query = """
-                    INSERT INTO dbo.stock_notes 
-                    (ticker, market, note_date, note_title, note_text, note_type)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """
-                    cursor.execute(insert_query, 
-                                 ticker, market, note_date, 
-                                 note_title if note_title else None, 
-                                 note_text, note_type)
-                    conn.commit()
-                    conn.close()
-                    
-                    st.success(f"✅ Note saved for {ticker}!")
-                    st.balloons()
-                    
-                except Exception as e:
-                    st.error(f"Error saving note: {e}")
-                    if "stock_notes" in str(e):
-                        st.info("💡 Please create the stock_notes table first. Go to 'Stock Notes & Journal' page for setup instructions.")
-            else:
-                st.warning("⚠️ Please enter some text before saving.")
+            
+            if st.button(f"💾 Save Note for {ticker}", type="primary", key=f"save_note_{ticker}"):
+                if note_text.strip():
+                    try:
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        
+                        insert_query = """
+                        INSERT INTO dbo.stock_notes 
+                        (ticker, market, note_date, note_title, note_text, note_type)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """
+                        cursor.execute(insert_query, 
+                                     ticker, market, note_date, 
+                                     note_title if note_title else None, 
+                                     note_text, note_type)
+                        conn.commit()
+                        conn.close()
+                        
+                        st.success(f"✅ Note saved for {ticker}!")
+                        st.balloons()
+                        
+                    except Exception as e:
+                        st.error(f"Error saving note: {e}")
+                        if "stock_notes" in str(e):
+                            st.info("💡 Please create the stock_notes table first. Go to 'Stock Notes & Journal' page for setup instructions.")
+                else:
+                    st.warning("⚠️ Please enter some text before saving.")
+    
+    with col2:
+        # Open notes in new tab button
+        notes_url = f"http://localhost:8501/?page=Stock_Notes_Journal"
+        st.markdown(f"""
+        <a href="{notes_url}" target="_blank" style="text-decoration: none;">
+            <button style="
+                background-color: #4CAF50;
+                border: none;
+                color: white;
+                padding: 10px 15px;
+                text-align: center;
+                font-size: 14px;
+                margin: 4px 2px;
+                cursor: pointer;
+                border-radius: 5px;
+                width: 100%;
+            ">
+                📝 Open Notes<br/>in New Tab
+            </button>
+        </a>
+        """, unsafe_allow_html=True)
 
 
 def show_stock_notes_journal():
