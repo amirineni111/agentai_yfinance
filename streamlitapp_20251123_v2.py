@@ -3225,7 +3225,7 @@ st.sidebar.header("📊 Dashboard Controls")
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🤖 AI Trading Signals Scanner", "📊 Master Data Editor", "💼 My Portfolio Tracker", "👨‍👩‍👧‍👦 For Family"],
+    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🤖 AI Trading Signals Scanner", "📊 Master Data Editor", "💼 My Portfolio Tracker", "� Stock Notes & Journal", "�👨‍👩‍👧‍👦 For Family"],
     index=0,
     key="main_page_selector"
 )
@@ -3668,6 +3668,11 @@ def show_data_table_page():
                     
                     st.markdown("---")
                     
+                    # Quick Add Note Widget (if filtering by specific symbol)
+                    if symbol_filter.strip() and unique_symbols == 1:
+                        quick_add_note_widget(df[symbol_col].iloc[0], market_selection)
+                        st.markdown("---")
+                    
                     # Display data table with improved formatting
                     st.markdown("### 📋 Historical Data Table")
                     
@@ -3956,6 +3961,11 @@ This comprehensive technical analysis combines **professional indicators**, **tr
         f"### 📌 Analyzing: **{selected_ticker}** in **{index_option}** "
         f"from **{start_date}** to **{end_date}**"
     )
+    
+    # Quick Add Note Widget
+    st.markdown("---")
+    quick_add_note_widget(selected_ticker, index_option)
+    st.markdown("---")
 
     # Load signal data (needed for all sections)
     bb_signals_df = load_signal_view(index_option, "BB", selected_ticker)
@@ -6641,7 +6651,7 @@ def get_ai_trading_signals_data(market: str, analysis_date: str) -> pd.DataFrame
         WHERE m.trading_date = ?
     ),
     prev_day_signals AS (
-        SELECT 
+        SELECT DISTINCT
             m.{ticker_col},
             (CASE WHEN bb.bb_trade_signal IS NOT NULL AND LOWER(bb.bb_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
              CASE WHEN m.MACD_Signal IS NOT NULL AND LOWER(m.MACD_Signal) LIKE '%buy%' THEN 1 ELSE 0 END +
@@ -6659,7 +6669,7 @@ def get_ai_trading_signals_data(market: str, analysis_date: str) -> pd.DataFrame
         WHERE m.trading_date = prev_day.prev_day_date
     ),
     prev_week_signals AS (
-        SELECT 
+        SELECT DISTINCT
             m.{ticker_col},
             (CASE WHEN bb.bb_trade_signal IS NOT NULL AND LOWER(bb.bb_trade_signal) LIKE '%buy%' THEN 1 ELSE 0 END +
              CASE WHEN m.MACD_Signal IS NOT NULL AND LOWER(m.MACD_Signal) LIKE '%buy%' THEN 1 ELSE 0 END +
@@ -6676,7 +6686,7 @@ def get_ai_trading_signals_data(market: str, analysis_date: str) -> pd.DataFrame
         CROSS JOIN prev_week
         WHERE m.trading_date = prev_week.prev_week_date
     )
-    SELECT 
+    SELECT DISTINCT
         c.*,
         ISNULL(pd.prev_day_bullish, 0) as prev_day_bullish,
         ISNULL(pd.prev_day_bearish, 0) as prev_day_bearish,
@@ -8053,6 +8063,371 @@ def show_portfolio_tracker():
         st.info("Please check your database connection.")
 
 
+def quick_add_note_widget(ticker: str, market: str):
+    """Quick note widget to add from any page"""
+    with st.expander(f"📝 Quick Add Note for {ticker}", expanded=False):
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            note_type = st.selectbox(
+                "Note Type",
+                ["General", "Buy Signal", "Sell Signal", "Technical Analysis", 
+                 "Fundamental Analysis", "News/Event", "Risk Warning", "Profit/Loss Review"],
+                key=f"quick_note_type_{ticker}"
+            )
+        
+        with col2:
+            note_date = st.date_input(
+                "Date",
+                value=datetime.now(),
+                key=f"quick_note_date_{ticker}"
+            )
+        
+        note_title = st.text_input(
+            "Title (Optional)",
+            placeholder="Brief summary...",
+            key=f"quick_note_title_{ticker}"
+        )
+        
+        note_text = st.text_area(
+            "Your Notes",
+            placeholder="Enter your analysis, observations, or decisions...",
+            height=150,
+            key=f"quick_note_text_{ticker}"
+        )
+        
+        if st.button(f"💾 Save Note for {ticker}", type="primary", key=f"save_note_{ticker}"):
+            if note_text.strip():
+                try:
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    
+                    insert_query = """
+                    INSERT INTO dbo.stock_notes 
+                    (ticker, market, note_date, note_title, note_text, note_type)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """
+                    cursor.execute(insert_query, 
+                                 ticker, market, note_date, 
+                                 note_title if note_title else None, 
+                                 note_text, note_type)
+                    conn.commit()
+                    conn.close()
+                    
+                    st.success(f"✅ Note saved for {ticker}!")
+                    st.balloons()
+                    
+                except Exception as e:
+                    st.error(f"Error saving note: {e}")
+                    if "stock_notes" in str(e):
+                        st.info("💡 Please create the stock_notes table first. Go to 'Stock Notes & Journal' page for setup instructions.")
+            else:
+                st.warning("⚠️ Please enter some text before saving.")
+
+
+def show_stock_notes_journal():
+    """Stock Notes & Journal - Add and review notes for any stock"""
+    st.markdown("""
+    # 📝 Stock Notes & Journal
+    
+    ### Keep track of your analysis, thoughts, and trading decisions
+    
+    Add notes for any stock and review them later to track your thought process.
+    
+    ---
+    """)
+    
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Check if stock_notes table exists, create if not (with error handling)
+        try:
+            create_table_query = """
+            IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='stock_notes' AND xtype='U')
+            CREATE TABLE dbo.stock_notes (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                ticker VARCHAR(50) NOT NULL,
+                market VARCHAR(20) NOT NULL,
+                note_date DATETIME DEFAULT GETDATE(),
+                note_title VARCHAR(200),
+                note_text VARCHAR(MAX),
+                note_type VARCHAR(50) DEFAULT 'General',
+                created_at DATETIME DEFAULT GETDATE(),
+                updated_at DATETIME DEFAULT GETDATE()
+            )
+            """
+            cursor.execute(create_table_query)
+            conn.commit()
+        except Exception as create_error:
+            # Table creation failed (likely permission issue), check if table exists
+            try:
+                cursor.execute("SELECT TOP 1 * FROM dbo.stock_notes")
+                # Table exists, continue
+            except:
+                st.error("❌ Stock Notes table doesn't exist. Please run the setup SQL script.")
+                st.code("""
+-- Run this in SQL Server Management Studio:
+USE stockdata_db
+GO
+CREATE TABLE dbo.stock_notes (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    ticker VARCHAR(50) NOT NULL,
+    market VARCHAR(20) NOT NULL,
+    note_date DATETIME DEFAULT GETDATE(),
+    note_title VARCHAR(200),
+    note_text VARCHAR(MAX),
+    note_type VARCHAR(50) DEFAULT 'General',
+    created_at DATETIME DEFAULT GETDATE(),
+    updated_at DATETIME DEFAULT GETDATE()
+)
+GO
+GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.stock_notes TO remote_user
+GO
+                """, language="sql")
+                conn.close()
+                return
+        
+        # Tabs for different views
+        tab1, tab2, tab3 = st.tabs(["➕ Add New Note", "📖 View All Notes", "🔍 Search Notes"])
+        
+        with tab1:
+            st.markdown("### Add New Note")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Market selection
+                note_market = st.selectbox(
+                    "📊 Select Market",
+                    ["NSE 500", "NASDAQ 100", "Forex"],
+                    key="note_market"
+                )
+                
+                # Get ticker list based on market
+                if note_market == "NSE 500":
+                    ticker_query = "SELECT DISTINCT ticker FROM dbo.nse_500_hist_data ORDER BY ticker"
+                elif note_market == "NASDAQ 100":
+                    ticker_query = "SELECT DISTINCT ticker FROM dbo.nasdaq_100_hist_data ORDER BY ticker"
+                else:
+                    ticker_query = "SELECT DISTINCT symbol as ticker FROM dbo.forex_hist_data ORDER BY ticker"
+                
+                ticker_df = pd.read_sql(ticker_query, conn)
+                note_ticker = st.selectbox(
+                    "🎯 Select Stock/Currency Pair",
+                    ticker_df['ticker'].tolist(),
+                    key="note_ticker"
+                )
+            
+            with col2:
+                note_type = st.selectbox(
+                    "📑 Note Type",
+                    ["General", "Buy Signal", "Sell Signal", "Technical Analysis", 
+                     "Fundamental Analysis", "News/Event", "Risk Warning", "Profit/Loss Review"],
+                    key="note_type"
+                )
+                
+                note_date = st.date_input(
+                    "📅 Note Date",
+                    value=datetime.now(),
+                    key="note_date"
+                )
+            
+            note_title = st.text_input(
+                "📌 Note Title (Optional)",
+                placeholder="e.g., Strong support at $150, RSI oversold condition",
+                key="note_title"
+            )
+            
+            note_text = st.text_area(
+                "✍️ Your Notes",
+                placeholder="Enter your detailed analysis, observations, or trading decisions...",
+                height=200,
+                key="note_text"
+            )
+            
+            if st.button("💾 Save Note", type="primary", use_container_width=True):
+                if note_text.strip():
+                    insert_query = """
+                    INSERT INTO dbo.stock_notes 
+                    (ticker, market, note_date, note_title, note_text, note_type)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """
+                    cursor.execute(insert_query, 
+                                 note_ticker, note_market, note_date, 
+                                 note_title if note_title else None, 
+                                 note_text, note_type)
+                    conn.commit()
+                    st.success(f"✅ Note saved successfully for {note_ticker}!")
+                    st.balloons()
+                else:
+                    st.warning("⚠️ Please enter some note text before saving.")
+        
+        with tab2:
+            st.markdown("### All Notes")
+            
+            # Fetch all notes
+            notes_query = """
+            SELECT 
+                id,
+                ticker,
+                market,
+                note_date,
+                note_title,
+                note_text,
+                note_type,
+                created_at
+            FROM dbo.stock_notes
+            ORDER BY note_date DESC, created_at DESC
+            """
+            
+            notes_df = pd.read_sql(notes_query, conn)
+            
+            if notes_df.empty:
+                st.info("📋 No notes recorded yet. Add your first note in the 'Add New Note' tab.")
+            else:
+                # Filter options
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    filter_market = st.selectbox(
+                        "Filter by Market",
+                        ["All"] + list(notes_df['market'].unique()),
+                        key="filter_market_view"
+                    )
+                
+                with col2:
+                    filter_type = st.selectbox(
+                        "Filter by Type",
+                        ["All"] + list(notes_df['note_type'].unique()),
+                        key="filter_type_view"
+                    )
+                
+                with col3:
+                    filter_ticker = st.selectbox(
+                        "Filter by Ticker",
+                        ["All"] + sorted(list(notes_df['ticker'].unique())),
+                        key="filter_ticker_view"
+                    )
+                
+                # Apply filters
+                filtered_notes = notes_df.copy()
+                if filter_market != "All":
+                    filtered_notes = filtered_notes[filtered_notes['market'] == filter_market]
+                if filter_type != "All":
+                    filtered_notes = filtered_notes[filtered_notes['note_type'] == filter_type]
+                if filter_ticker != "All":
+                    filtered_notes = filtered_notes[filtered_notes['ticker'] == filter_ticker]
+                
+                st.markdown(f"**Showing {len(filtered_notes)} of {len(notes_df)} notes**")
+                
+                # Display notes
+                for _, note in filtered_notes.iterrows():
+                    # Note type emoji mapping
+                    type_emoji = {
+                        "General": "📝",
+                        "Buy Signal": "🟢",
+                        "Sell Signal": "🔴",
+                        "Technical Analysis": "📊",
+                        "Fundamental Analysis": "📈",
+                        "News/Event": "📰",
+                        "Risk Warning": "⚠️",
+                        "Profit/Loss Review": "💰"
+                    }
+                    
+                    emoji = type_emoji.get(note['note_type'], "📝")
+                    
+                    with st.expander(
+                        f"{emoji} {note['ticker']} ({note['market']}) - {note['note_date'].strftime('%Y-%m-%d')} - {note['note_type']}",
+                        expanded=False
+                    ):
+                        if note['note_title']:
+                            st.markdown(f"**{note['note_title']}**")
+                        
+                        st.markdown(note['note_text'])
+                        
+                        col1, col2, col3 = st.columns([2, 2, 1])
+                        with col1:
+                            st.caption(f"📅 Note Date: {note['note_date'].strftime('%Y-%m-%d %H:%M')}")
+                        with col2:
+                            st.caption(f"🕐 Created: {note['created_at'].strftime('%Y-%m-%d %H:%M')}")
+                        with col3:
+                            if st.button("🗑️ Delete", key=f"delete_{note['id']}"):
+                                delete_query = "DELETE FROM dbo.stock_notes WHERE id = ?"
+                                cursor.execute(delete_query, note['id'])
+                                conn.commit()
+                                st.success("Note deleted!")
+                                st.rerun()
+        
+        with tab3:
+            st.markdown("### Search Notes")
+            
+            search_text = st.text_input(
+                "🔍 Search in notes",
+                placeholder="Enter keywords to search in note titles and text...",
+                key="search_notes"
+            )
+            
+            if search_text:
+                search_query = """
+                SELECT 
+                    id,
+                    ticker,
+                    market,
+                    note_date,
+                    note_title,
+                    note_text,
+                    note_type,
+                    created_at
+                FROM dbo.stock_notes
+                WHERE 
+                    note_title LIKE ? OR 
+                    note_text LIKE ? OR 
+                    ticker LIKE ?
+                ORDER BY note_date DESC, created_at DESC
+                """
+                
+                search_pattern = f"%{search_text}%"
+                search_results = pd.read_sql(search_query, conn, params=[search_pattern, search_pattern, search_pattern])
+                
+                if search_results.empty:
+                    st.info(f"No notes found matching '{search_text}'")
+                else:
+                    st.markdown(f"**Found {len(search_results)} notes matching '{search_text}'**")
+                    
+                    # Display search results
+                    for _, note in search_results.iterrows():
+                        type_emoji = {
+                            "General": "📝",
+                            "Buy Signal": "🟢",
+                            "Sell Signal": "🔴",
+                            "Technical Analysis": "📊",
+                            "Fundamental Analysis": "📈",
+                            "News/Event": "📰",
+                            "Risk Warning": "⚠️",
+                            "Profit/Loss Review": "💰"
+                        }
+                        
+                        emoji = type_emoji.get(note['note_type'], "📝")
+                        
+                        with st.expander(
+                            f"{emoji} {note['ticker']} ({note['market']}) - {note['note_date'].strftime('%Y-%m-%d')} - {note['note_type']}",
+                            expanded=True
+                        ):
+                            if note['note_title']:
+                                st.markdown(f"**{note['note_title']}**")
+                            
+                            st.markdown(note['note_text'])
+                            
+                            st.caption(f"📅 {note['note_date'].strftime('%Y-%m-%d %H:%M')} | 🕐 Created: {note['created_at'].strftime('%Y-%m-%d %H:%M')}")
+        
+        conn.close()
+        
+    except Exception as e:
+        st.error(f"❌ Error in Stock Notes: {e}")
+        st.info("Please check your database connection.")
+
+
 def show_family_assets_page():
     """For Family - Track family assets and liabilities"""
     st.markdown("""
@@ -8664,7 +9039,9 @@ elif page == "📊 Master Data Editor":
     show_master_data_editor()
 elif page == "💼 My Portfolio Tracker":
     show_portfolio_tracker()
-elif page == "👨‍👩‍👧‍👦 For Family":
+elif page == "� Stock Notes & Journal":
+    show_stock_notes_journal()
+elif page == "�👨‍👩‍👧‍👦 For Family":
     show_family_assets_page()
 elif page == "🤖 AI Trading Signals Scanner":
     show_ai_trading_signals_scanner()
