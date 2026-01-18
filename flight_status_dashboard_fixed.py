@@ -96,11 +96,15 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
     # Map to your existing table and view names
     if index_name == 'NSE 500':
         base_table = 'nse_500_hist_data'
+        ticker_column = 'ticker'
+        company_column = 'company'
         rsi_view = 'nse_500_RSI_calculation'
         macd_view = 'nse_500_macd'
         bb_view = 'nse_500_bollingerband'
         sma_view = 'nse_500_ema_sma_view'
         atr_view = 'nse_500_atr'
+        fibonacci_view = 'nse_500_fibonacci'
+        stochastic_view = 'nse_500_stochastic'
         
         # Signal views
         rsi_signals = 'nse_500_rsi_signals'
@@ -108,19 +112,42 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
         bb_signals = 'nse_500_bb_signals' 
         sma_signals = 'nse_500_sma_signals'
         atr_signals = 'nse_500_atr_spikes'
-    else:  # NASDAQ 100
+        
+    elif index_name == 'NASDAQ 100':
         base_table = 'nasdaq_100_hist_data'
+        ticker_column = 'ticker'
+        company_column = 'company'
         rsi_view = 'nasdaq_100_RSI_calculation'
         macd_view = 'nasdaq_100_macd'
         bb_view = 'nasdaq_100_bollingerband' 
         sma_view = 'nasdaq_100_ema_sma_view'
         atr_view = 'nasdaq_100_atr'
+        fibonacci_view = 'nasdaq_100_fibonacci'
+        stochastic_view = 'nasdaq_100_stochastic'
         
         rsi_signals = 'nasdaq_100_rsi_signals'
         macd_signals = 'nasdaq_100_macd_signals'
         bb_signals = 'nasdaq_100_bb_signals'
         sma_signals = 'nasdaq_100_sma_signals'
         atr_signals = 'nasdaq_100_atr_spikes'
+        
+    else:  # Forex
+        base_table = 'forex_hist_data'
+        ticker_column = 'symbol'  # Forex uses 'symbol' not 'ticker'
+        company_column = 'symbol'  # Forex uses symbol for both
+        rsi_view = 'forex_RSI_calculation'
+        macd_view = 'forex_macd'
+        bb_view = 'forex_bollingerband'
+        sma_view = 'forex_ema_sma_view'
+        atr_view = 'forex_atr'
+        fibonacci_view = 'forex_fibonacci'
+        stochastic_view = 'forex_stochastic'
+        
+        rsi_signals = 'forex_rsi_signals'
+        macd_signals = 'forex_macd_signals'
+        bb_signals = 'forex_bb_signals'
+        sma_signals = 'forex_sma_signals'
+        atr_signals = 'forex_atr_spikes'
     
     limit_clause = f"TOP {limit}" if limit else ""
     
@@ -130,8 +157,8 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
     -- Get latest price data for each stock
     LatestPrices AS (
         SELECT 
-            ticker,
-            company,
+            {ticker_column} as ticker,
+            {company_column} as company,
             trading_date,
             CAST(close_price AS FLOAT) AS close_price,
             CAST(open_price AS FLOAT) AS open_price,
@@ -140,7 +167,7 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
             CAST(volume AS FLOAT) AS volume,
             -- Calculate daily change
             ROUND(((CAST(close_price AS FLOAT) - CAST(open_price AS FLOAT)) / CAST(open_price AS FLOAT)) * 100, 2) as daily_change_pct,
-            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+            ROW_NUMBER() OVER (PARTITION BY {ticker_column} ORDER BY trading_date DESC) as rn
         FROM dbo.{base_table}
     ),
     
@@ -187,10 +214,34 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
     -- Latest ATR
     LatestATR AS (
         SELECT 
-            ticker, 
+            {ticker_column} as ticker, 
             ATR_14,
-            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) as rn
+            ROW_NUMBER() OVER (PARTITION BY {ticker_column} ORDER BY trading_date DESC) as rn
         FROM dbo.{atr_view}
+    ),
+    
+    -- Latest Fibonacci Levels
+    LatestFibonacci AS (
+        SELECT 
+            {ticker_column} as ticker,
+            fib_position,
+            fib_trade_signal,
+            distance_to_nearest_fib_pct,
+            ROW_NUMBER() OVER (PARTITION BY {ticker_column} ORDER BY trading_date DESC) as rn
+        FROM dbo.{fibonacci_view}
+    ),
+    
+    -- Latest Stochastic Oscillator
+    LatestStochastic AS (
+        SELECT 
+            {ticker_column} as ticker,
+            stoch_14d_k,
+            stoch_14d_d,
+            stoch_status,
+            stoch_crossover,
+            stoch_trade_signal,
+            ROW_NUMBER() OVER (PARTITION BY {ticker_column} ORDER BY trading_date DESC) as rn
+        FROM dbo.{stochastic_view}
     ),
     
     -- Latest trading signals (get most recent signal for each indicator)
@@ -201,34 +252,47 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
             -- RSI Signal (latest non-null)
             (SELECT TOP 1 rsi_trade_signal 
              FROM dbo.{rsi_signals} rs 
-             WHERE rs.ticker = p.ticker AND rs.rsi_trade_signal IS NOT NULL
+             WHERE rs.{ticker_column} = p.ticker AND rs.rsi_trade_signal IS NOT NULL
              ORDER BY rs.trading_date DESC) as rsi_signal,
              
             -- MACD Signal (latest non-null)  
             (SELECT TOP 1 MACD_Signal
              FROM dbo.{macd_signals} ms
-             WHERE ms.ticker = p.ticker AND ms.MACD_Signal IS NOT NULL
+             WHERE ms.{ticker_column} = p.ticker AND ms.MACD_Signal IS NOT NULL
              ORDER BY ms.trading_date DESC) as macd_signal,
              
             -- BB Signal (latest non-null)
             (SELECT TOP 1 bb_trade_signal
              FROM dbo.{bb_signals} bs  
-             WHERE bs.ticker = p.ticker AND bs.bb_trade_signal IS NOT NULL
+             WHERE bs.{ticker_column} = p.ticker AND bs.bb_trade_signal IS NOT NULL
              ORDER BY bs.trading_date DESC) as bb_signal,
              
             -- SMA Signal (latest non-null)
             (SELECT TOP 1 sma_trade_signal
              FROM dbo.{sma_signals} ss
-             WHERE ss.ticker = p.ticker AND ss.sma_trade_signal IS NOT NULL  
+             WHERE ss.{ticker_column} = p.ticker AND ss.sma_trade_signal IS NOT NULL  
              ORDER BY ss.trading_date DESC) as sma_signal,
              
             -- ATR Signal (latest non-null)
             (SELECT TOP 1 atr_volatility_signal
              FROM dbo.{atr_signals} ats
-             WHERE ats.ticker = p.ticker AND ats.atr_volatility_signal IS NOT NULL
-             ORDER BY ats.trading_date DESC) as atr_signal
+             WHERE ats.{ticker_column} = p.ticker AND ats.atr_volatility_signal IS NOT NULL
+             ORDER BY ats.trading_date DESC) as atr_signal,
              
-        FROM (SELECT DISTINCT ticker FROM dbo.{base_table}) p
+            -- MA/SMA Crossover Signal
+            (SELECT TOP 1 
+                CASE 
+                    WHEN SMA_50 > SMA_200 AND LAG(SMA_50) OVER (ORDER BY trading_date) <= LAG(SMA_200) OVER (ORDER BY trading_date) THEN 'GOLDEN_CROSS_BUY'
+                    WHEN SMA_50 < SMA_200 AND LAG(SMA_50) OVER (ORDER BY trading_date) >= LAG(SMA_200) OVER (ORDER BY trading_date) THEN 'DEATH_CROSS_SELL'
+                    WHEN SMA_50 > SMA_200 THEN 'BULLISH_TREND'
+                    WHEN SMA_50 < SMA_200 THEN 'BEARISH_TREND'
+                    ELSE NULL
+                END
+             FROM dbo.{sma_view} sv
+             WHERE sv.{ticker_column} = p.ticker
+             ORDER BY sv.trading_date DESC) as ma_crossover_signal
+             
+        FROM (SELECT DISTINCT {ticker_column} as ticker FROM dbo.{base_table}) p
     )
     
     -- Main query combining all data
@@ -247,12 +311,20 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
         sma.SMA_50,
         sma.SMA_200,
         atr.ATR_14,
+        fib.fib_position,
+        fib.distance_to_nearest_fib_pct,
+        stoch.stoch_14d_k,
+        stoch.stoch_14d_d,
+        stoch.stoch_status,
         
         -- Trading Signals
         sig.rsi_signal,
         sig.macd_signal,
         sig.bb_signal, 
         sig.sma_signal,
+        fib.fib_trade_signal,
+        stoch.stoch_trade_signal,
+        sig.ma_crossover_signal,
         
         -- Calculated Analysis Fields
         CASE 
@@ -273,7 +345,7 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
             ELSE 'Sideways'
         END as long_term_trend,
         
-        -- Signal Strength Score (-5 to +5)
+        -- Enhanced Signal Strength Score (-10 to +10) with all indicators
         (
             -- RSI contribution 
             CASE 
@@ -303,6 +375,31 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
                 ELSE 0 
             END +
             
+            -- Fibonacci contribution (weighted higher for strong signals)
+            CASE 
+                WHEN fib.fib_trade_signal LIKE '%STRONG_BUY%' THEN 2
+                WHEN fib.fib_trade_signal LIKE '%BUY%' THEN 1
+                WHEN fib.fib_trade_signal LIKE '%STRONG_SELL%' THEN -2
+                WHEN fib.fib_trade_signal LIKE '%SELL%' THEN -1
+                ELSE 0 
+            END +
+            
+            -- Stochastic contribution
+            CASE 
+                WHEN stoch.stoch_trade_signal LIKE '%BUY%' THEN 1
+                WHEN stoch.stoch_trade_signal LIKE '%SELL%' THEN -1
+                ELSE 0 
+            END +
+            
+            -- MA/SMA Crossover contribution (strong signal)
+            CASE 
+                WHEN sig.ma_crossover_signal = 'GOLDEN_CROSS_BUY' THEN 2
+                WHEN sig.ma_crossover_signal = 'BULLISH_TREND' THEN 1
+                WHEN sig.ma_crossover_signal = 'DEATH_CROSS_SELL' THEN -2
+                WHEN sig.ma_crossover_signal = 'BEARISH_TREND' THEN -1
+                ELSE 0 
+            END +
+            
             -- Overall trend contribution
             CASE 
                 WHEN p.close_price > sma.SMA_200 THEN 1
@@ -324,6 +421,8 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
     LEFT JOIN LatestBB bb ON p.ticker = bb.ticker AND bb.rn = 1
     LEFT JOIN LatestSMA sma ON p.ticker = sma.ticker AND sma.rn = 1
     LEFT JOIN LatestATR atr ON p.ticker = atr.ticker AND atr.rn = 1
+    LEFT JOIN LatestFibonacci fib ON p.ticker = fib.ticker AND fib.rn = 1
+    LEFT JOIN LatestStochastic stoch ON p.ticker = stoch.ticker AND stoch.rn = 1
     LEFT JOIN LatestSignals sig ON p.ticker = sig.ticker
     WHERE p.rn = 1
     ORDER BY p.ticker
@@ -371,8 +470,8 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     
     st.sidebar.subheader("🔍 Flight Status Filters")
     
-    # Signal Type Filter
-    signal_types = ['All', 'Strong Buy (4-5)', 'Buy (1-3)', 'Hold (0)', 'Sell (-3 to -1)', 'Strong Sell (-5 to -4)']
+    # Signal Type Filter (updated for new range)
+    signal_types = ['All', 'Strong Buy (6-10)', 'Buy (1-5)', 'Hold (0)', 'Sell (-5 to -1)', 'Strong Sell (-10 to -6)']
     selected_signal = st.sidebar.selectbox("Signal Type", signal_types)
     
     # RSI Status Filter
@@ -390,18 +489,18 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     # Apply filters
     filtered_df = df.copy()
     
-    # Signal filter
+    # Signal filter (updated for -10 to +10 range)
     if selected_signal != 'All':
-        if selected_signal == 'Strong Buy (4-5)':
-            filtered_df = filtered_df[filtered_df['signal_score'] >= 4]
-        elif selected_signal == 'Buy (1-3)':
-            filtered_df = filtered_df[(filtered_df['signal_score'] >= 1) & (filtered_df['signal_score'] <= 3)]
+        if selected_signal == 'Strong Buy (6-10)':
+            filtered_df = filtered_df[filtered_df['signal_score'] >= 6]
+        elif selected_signal == 'Buy (1-5)':
+            filtered_df = filtered_df[(filtered_df['signal_score'] >= 1) & (filtered_df['signal_score'] <= 5)]
         elif selected_signal == 'Hold (0)':
             filtered_df = filtered_df[filtered_df['signal_score'] == 0]
-        elif selected_signal == 'Sell (-3 to -1)':
-            filtered_df = filtered_df[(filtered_df['signal_score'] <= -1) & (filtered_df['signal_score'] >= -3)]
-        elif selected_signal == 'Strong Sell (-5 to -4)':
-            filtered_df = filtered_df[filtered_df['signal_score'] <= -4]
+        elif selected_signal == 'Sell (-5 to -1)':
+            filtered_df = filtered_df[(filtered_df['signal_score'] <= -1) & (filtered_df['signal_score'] >= -5)]
+        elif selected_signal == 'Strong Sell (-10 to -6)':
+            filtered_df = filtered_df[filtered_df['signal_score'] <= -6]
     
     # Other filters
     if selected_rsi != 'All':
@@ -416,30 +515,30 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     return filtered_df
 
 def get_signal_color(score):
-    """Get color for signal score"""
-    if score >= 4:
-        return '#00ff00'  # Strong Green
+    """Get color for signal score (updated for -10 to +10 range)"""
+    if score >= 6:
+        return '#00ff00'  # Strong Green - Strong Buy
     elif score >= 1:
-        return '#90ee90'  # Light Green
+        return '#90ee90'  # Light Green - Buy
     elif score == 0:
-        return '#ffff00'  # Yellow
-    elif score >= -3:
-        return '#ffa500'  # Orange
+        return '#ffff00'  # Yellow - Hold
+    elif score >= -5:
+        return '#ffa500'  # Orange - Sell
     else:
-        return '#ff0000'  # Red
+        return '#ff0000'  # Red - Strong Sell
 
 def get_flight_status_emoji(score):
-    """Get emoji for flight status"""
-    if score >= 4:
-        return '✈️🟢'  # Ready for takeoff
+    """Get emoji for flight status (updated for -10 to +10 range)"""
+    if score >= 6:
+        return '✈️🟢'  # Ready for takeoff - Strong Buy
     elif score >= 1:
-        return '🟢'     # Boarding
+        return '🟢'     # Boarding - Buy
     elif score == 0:
-        return '🟡'     # On schedule
-    elif score >= -3:
-        return '🟠'     # Delayed
+        return '🟡'     # On schedule - Hold
+    elif score >= -5:
+        return '🟠'     # Delayed - Sell
     else:
-        return '🔴'     # Cancelled
+        return '🔴'     # Cancelled - Strong Sell
 
 # ----------------------------
 # MAIN APP
@@ -467,25 +566,29 @@ def main():
     
     with st.expander("ℹ️ How to Read the Dashboard", expanded=False):
         st.markdown("""
-        **Signal Score**: -5 to +5
-        - **+4,+5**: Strong Buy
-        - **+1 to +3**: Buy
-        - **0**: Hold/Neutral
-        - **-1 to -3**: Sell
-        - **-4,-5**: Strong Sell
+        **Enhanced Signal Score**: -10 to +10 (now includes 7 indicators!)
+        - **+6 to +10**: Strong Buy (Multiple strong bullish signals)
+        - **+1 to +5**: Buy (Moderate bullish signals)
+        - **0**: Hold/Neutral (No clear direction)
+        - **-1 to -5**: Sell (Moderate bearish signals)
+        - **-6 to -10**: Strong Sell (Multiple strong bearish signals)
         
-        **Technical Indicators**:
-        - **RSI**: Momentum (30-70 normal)
-        - **MACD**: Trend direction
-        - **SMA**: Long-term trend vs 200-day
+        **Technical Indicators Included**:
+        - **RSI**: Momentum indicator (30-70 normal range)
+        - **MACD**: Trend direction and momentum
+        - **Bollinger Bands**: Volatility and price extremes
+        - **SMA/EMA**: Long-term trend vs 50/200-day averages
+        - **Fibonacci Retracements**: Support/resistance levels (weighted 2x for strong signals)
+        - **Stochastic Oscillator**: Overbought/oversold conditions
+        - **MA Crossover**: Golden/Death cross signals (weighted 2x)
         
-        **Data Sources**: Your SQL Server database views
+        **Data Sources**: Your SQL Server database views (real-time technical analysis)
         """)
     
     # Index Selection
     index_name = st.selectbox(
         "Select Index",
-        ["NSE 500", "NASDAQ 100"],
+        ["NSE 500", "NASDAQ 100", "Forex"],
         help="Choose which market index to analyze"
     )
     
@@ -546,9 +649,9 @@ def main():
             ),
             'Signal Score': st.column_config.NumberColumn(
                 '📊 Score',
-                help='Combined signal strength (-5 to +5)',
-                min_value=-5,
-                max_value=5,
+                help='Combined signal strength (-10 to +10) - includes RSI, MACD, BB, SMA, Fibonacci, Stochastic, MA Crossover',
+                min_value=-10,
+                max_value=10,
                 format='%d'
             ),
             'Price': st.column_config.NumberColumn(

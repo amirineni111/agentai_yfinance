@@ -2866,11 +2866,11 @@ def plot_signal_view(view_type: str, df: pd.DataFrame, label: str):
 # FLIGHT STATUS DASHBOARD FUNCTIONS
 # ----------------------------
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
+@st.cache_data(ttl=600)  # Cache for 10 minutes - increased for better performance
+def load_flight_status_data(index_name: str, limit: int = 100) -> pd.DataFrame:
     """
-    SIMPLIFIED: Flight status data using only core tables that exist
-    Fixed to work with your actual database structure
+    OPTIMIZED: Fast flight status data retrieval with default limit
+    Uses simplified query without expensive subqueries for better performance
     """
     
     # Map to your existing table and view names
@@ -2881,7 +2881,17 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
         bb_view = 'nse_500_bollingerband'
         sma_view = 'nse_500_ema_sma_view'
         atr_view = 'nse_500_atr'
+        fibonacci_view = 'nse_500_fibonacci'
+        stochastic_view = 'nse_500_stochastic'
         ticker_col = 'ticker'
+        company_col = 'company'
+        fib_col = 'ticker'  # NSE uses ticker consistently
+        stoch_col = 'ticker'
+        # Signal views
+        rsi_signals = 'nse_500_rsi_signals'
+        macd_signals = 'nse_500_macd_signals'
+        bb_signals = 'nse_500_bb_signals'
+        sma_signals = 'nse_500_sma_signals'
     elif index_name == 'Forex':
         base_table = 'forex_hist_data'
         rsi_view = 'forex_RSI_calculation'
@@ -2889,7 +2899,17 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
         bb_view = 'forex_bollingerband'
         sma_view = 'forex_ema_sma_view'
         atr_view = 'forex_atr'
-        ticker_col = 'symbol'
+        fibonacci_view = 'forex_fibonacci'
+        stochastic_view = 'forex_stochastic'
+        ticker_col = 'symbol'  # Most forex tables use 'symbol'
+        company_col = 'symbol'
+        fib_col = 'ticker'  # But fibonacci uses 'ticker'
+        stoch_col = 'ticker'  # And stochastic uses 'ticker'
+        # Signal views
+        rsi_signals = 'forex_rsi_signals'
+        macd_signals = 'forex_macd_signals'
+        bb_signals = 'forex_bb_signals'
+        sma_signals = 'forex_sma_signals'
     else:  # NASDAQ 100
         base_table = 'nasdaq_100_hist_data'
         rsi_view = 'nasdaq_100_RSI_calculation'
@@ -2897,7 +2917,17 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
         bb_view = 'nasdaq_100_bollingerband' 
         sma_view = 'nasdaq_100_ema_sma_view'
         atr_view = 'nasdaq_100_atr'
+        fibonacci_view = 'nasdaq_100_fibonacci'
+        stochastic_view = 'nasdaq_100_stochastic'
         ticker_col = 'ticker'
+        company_col = 'company'
+        fib_col = 'ticker'  # NASDAQ uses ticker consistently
+        stoch_col = 'ticker'
+        # Signal views
+        rsi_signals = 'nasdaq_100_rsi_signals'
+        macd_signals = 'nasdaq_100_macd_signals'
+        bb_signals = 'nasdaq_100_bb_signals'
+        sma_signals = 'nasdaq_100_sma_signals'
     
     limit_clause = f"TOP {limit}" if limit else ""  # No default limit - load all stocks
     
@@ -2908,7 +2938,7 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
     LatestPrices AS (
         SELECT 
             {ticker_col} as ticker,
-            company,
+            {company_col} as company,
             trading_date,
             CAST(close_price AS FLOAT) AS close_price,
             CAST(open_price AS FLOAT) AS open_price,
@@ -2968,9 +2998,33 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
             ATR_14,
             ROW_NUMBER() OVER (PARTITION BY {ticker_col} ORDER BY trading_date DESC) as rn
         FROM dbo.{atr_view}
+    ),
+    
+    -- Latest Fibonacci Levels
+    LatestFibonacci AS (
+        SELECT 
+            {fib_col} as ticker,
+            fib_position,
+            fib_trade_signal,
+            distance_to_nearest_fib_pct,
+            ROW_NUMBER() OVER (PARTITION BY {fib_col} ORDER BY trading_date DESC) as rn
+        FROM dbo.{fibonacci_view}
+    ),
+    
+    -- Latest Stochastic Oscillator
+    LatestStochastic AS (
+        SELECT 
+            {stoch_col} as ticker,
+            stoch_14d_k,
+            stoch_14d_d,
+            stoch_status,
+            stoch_crossover,
+            stoch_trade_signal,
+            ROW_NUMBER() OVER (PARTITION BY {stoch_col} ORDER BY trading_date DESC) as rn
+        FROM dbo.{stochastic_view}
     )
     
-    -- Main query combining all data
+    -- Main query combining all data (removed expensive LatestSignals CTE for performance)
     SELECT {limit_clause}
         p.ticker,
         p.company,
@@ -2989,8 +3043,13 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
         sma.SMA_200,
         sma.EMA_50,
         atr.ATR_14,
+        fib.fib_position,
+        fib.distance_to_nearest_fib_pct,
+        stoch.stoch_14d_k,
+        stoch.stoch_14d_d,
+        stoch.stoch_status,
         
-        -- Calculated Trading Signals (derived from indicators)
+        -- Trading Signals (derived directly from indicators for performance)
         CASE 
             WHEN r.RSI < 30 THEN 'Buy'
             WHEN r.RSI > 70 THEN 'Sell'
@@ -3015,6 +3074,17 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
             ELSE 'Hold'
         END as sma_signal,
         
+        -- New signals from views
+        fib.fib_trade_signal,
+        stoch.stoch_trade_signal,
+        
+        -- MA Crossover signal
+        CASE 
+            WHEN sma.SMA_50 > sma.SMA_200 THEN 'BULLISH_TREND'
+            WHEN sma.SMA_50 < sma.SMA_200 THEN 'BEARISH_TREND'
+            ELSE NULL
+        END as ma_crossover_signal,
+        
         -- Calculated Analysis Fields
         CASE 
             WHEN r.RSI > 70 THEN 'Overbought'
@@ -3034,7 +3104,7 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
             ELSE 'Sideways'
         END as long_term_trend,
         
-        -- Signal Strength Score (-4 to +4) based on indicators
+        -- Enhanced Signal Strength Score (-10 to +10) with 7 indicators
         (
             -- RSI contribution 
             CASE 
@@ -3057,10 +3127,35 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
                 ELSE 0 
             END +
             
-            -- SMA contribution (Golden/Death Cross)
+            -- SMA contribution
             CASE 
                 WHEN sma.SMA_50 > sma.SMA_200 THEN 1
                 WHEN sma.SMA_50 < sma.SMA_200 THEN -1
+                ELSE 0 
+            END +
+            
+            -- Fibonacci contribution (weighted 2x for strong signals)
+            CASE 
+                WHEN fib.fib_trade_signal LIKE '%STRONG_BUY%' THEN 2
+                WHEN fib.fib_trade_signal LIKE '%BUY%' THEN 1
+                WHEN fib.fib_trade_signal LIKE '%STRONG_SELL%' THEN -2
+                WHEN fib.fib_trade_signal LIKE '%SELL%' THEN -1
+                ELSE 0 
+            END +
+            
+            -- Stochastic contribution
+            CASE 
+                WHEN stoch.stoch_trade_signal LIKE '%BUY%' THEN 1
+                WHEN stoch.stoch_trade_signal LIKE '%SELL%' THEN -1
+                ELSE 0 
+            END +
+            
+            -- MA/SMA Crossover contribution (weighted 2x for strong signals)
+            CASE 
+                WHEN sma.SMA_50 > sma.SMA_200 AND p.close_price > sma.SMA_50 THEN 2  -- Strong bullish
+                WHEN sma.SMA_50 > sma.SMA_200 THEN 1  -- Bullish trend
+                WHEN sma.SMA_50 < sma.SMA_200 AND p.close_price < sma.SMA_50 THEN -2  -- Strong bearish
+                WHEN sma.SMA_50 < sma.SMA_200 THEN -1  -- Bearish trend
                 ELSE 0 
             END
         ) as signal_score,
@@ -3078,8 +3173,10 @@ def load_flight_status_data(index_name: str, limit: int = None) -> pd.DataFrame:
     LEFT JOIN LatestBB bb ON p.ticker = bb.ticker AND bb.rn = 1
     LEFT JOIN LatestSMA sma ON p.ticker = sma.ticker AND sma.rn = 1
     LEFT JOIN LatestATR atr ON p.ticker = atr.ticker AND atr.rn = 1
+    LEFT JOIN LatestFibonacci fib ON p.ticker = fib.ticker AND fib.rn = 1
+    LEFT JOIN LatestStochastic stoch ON p.ticker = stoch.ticker AND stoch.rn = 1
     WHERE p.rn = 1
-    ORDER BY p.ticker
+    ORDER BY signal_score DESC, p.ticker
     """
     
     return execute_query_safe(query)
@@ -3129,8 +3226,8 @@ def apply_flight_status_filters(df: pd.DataFrame) -> pd.DataFrame:
         help="Search by ticker symbol or company name"
     )
     
-    # Signal Type Filter
-    signal_types = ['All', 'Strong Buy (4-5)', 'Buy (1-3)', 'Hold (0)', 'Sell (-3 to -1)', 'Strong Sell (-5 to -4)']
+    # Signal Type Filter (updated for -10 to +10 range)
+    signal_types = ['All', 'Strong Buy (6-10)', 'Buy (1-5)', 'Hold (0)', 'Sell (-5 to -1)', 'Strong Sell (-10 to -6)']
     selected_signal = st.sidebar.selectbox("Signal Type", signal_types, key="flight_signal_filter")
     
     # RSI Status Filter
@@ -3156,18 +3253,18 @@ def apply_flight_status_filters(df: pd.DataFrame) -> pd.DataFrame:
             filtered_df['company'].str.lower().str.contains(search_lower, na=False)
         ]
     
-    # Signal filter
+    # Signal filter (updated for -10 to +10 range)
     if selected_signal != 'All':
-        if selected_signal == 'Strong Buy (4-5)':
-            filtered_df = filtered_df[filtered_df['signal_score'] >= 4]
-        elif selected_signal == 'Buy (1-3)':
-            filtered_df = filtered_df[(filtered_df['signal_score'] >= 1) & (filtered_df['signal_score'] <= 3)]
+        if selected_signal == 'Strong Buy (6-10)':
+            filtered_df = filtered_df[filtered_df['signal_score'] >= 6]
+        elif selected_signal == 'Buy (1-5)':
+            filtered_df = filtered_df[(filtered_df['signal_score'] >= 1) & (filtered_df['signal_score'] <= 5)]
         elif selected_signal == 'Hold (0)':
             filtered_df = filtered_df[filtered_df['signal_score'] == 0]
-        elif selected_signal == 'Sell (-3 to -1)':
-            filtered_df = filtered_df[(filtered_df['signal_score'] <= -1) & (filtered_df['signal_score'] >= -3)]
-        elif selected_signal == 'Strong Sell (-5 to -4)':
-            filtered_df = filtered_df[filtered_df['signal_score'] <= -4]
+        elif selected_signal == 'Sell (-5 to -1)':
+            filtered_df = filtered_df[(filtered_df['signal_score'] <= -1) & (filtered_df['signal_score'] >= -5)]
+        elif selected_signal == 'Strong Sell (-10 to -6)':
+            filtered_df = filtered_df[filtered_df['signal_score'] <= -6]
     
     # Other filters
     if selected_rsi != 'All':
@@ -3182,17 +3279,17 @@ def apply_flight_status_filters(df: pd.DataFrame) -> pd.DataFrame:
     return filtered_df
 
 def get_flight_status_emoji(score):
-    """Get emoji for flight status"""
-    if score >= 4:
-        return '✈️🟢'  # Ready for takeoff
+    """Get emoji for flight status (updated for -10 to +10 range)"""
+    if score >= 6:
+        return '✈️🟢'  # Ready for takeoff - Strong Buy
     elif score >= 1:
-        return '🟢'     # Boarding
+        return '🟢'     # Boarding - Buy
     elif score == 0:
-        return '🟡'     # On schedule
-    elif score >= -3:
-        return '🟠'     # Delayed
+        return '🟡'     # On schedule - Hold
+    elif score >= -5:
+        return '🟠'     # Delayed - Sell
     else:
-        return '🔴'     # Cancelled
+        return '🔴'     # Cancelled - Strong Sell
 
 # ----------------------------
 # MAIN APP
@@ -3225,7 +3322,7 @@ st.sidebar.header("📊 Dashboard Controls")
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "🤖 AI Price Predictions", "🛩️ Flight Status Dashboard", "📊 NASDAQ ML Predictions", "📈 NSE ML Predictions", "💱 Forex ML Predictions", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🤖 AI Trading Signals Scanner", "📊 Master Data Editor", "💼 My Portfolio Tracker", "� Stock Notes & Journal", "�👨‍👩‍👧‍👦 For Family"],
+    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "� Backtesting Analytics", "�🛩️ Flight Status Dashboard", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🎯 Double/Triple Strategy", "📊 Master Data Editor", "💼 My Portfolio Tracker", "� Stock Notes & Journal", "�👨‍👩‍👧‍👦 For Family"],
     index=0,
     key="main_page_selector"
 )
@@ -4533,6 +4630,179 @@ This comprehensive technical analysis combines **professional indicators**, **tr
         """)
 
 
+def show_prediction_backtesting(market, ticker):
+    """Display historical prediction accuracy and backtesting results"""
+    import pandas as pd
+    
+    try:
+        conn = get_db_connection()
+        
+        # Overall model performance summary
+        st.markdown("### 🎯 Model Performance Summary (All Time)")
+        
+        summary_query = """
+        SELECT 
+            model_name,
+            days_ahead,
+            completed_predictions,
+            ROUND(avg_mae, 4) as avg_mae,
+            ROUND(avg_rmse, 4) as avg_rmse,
+            ROUND(avg_percentage_error, 2) as avg_error_pct,
+            ROUND(directional_accuracy_pct, 1) as direction_accuracy
+        FROM vw_model_performance_summary
+        WHERE market = ? AND completed_predictions > 0
+        ORDER BY days_ahead, avg_rmse
+        """
+        
+        summary_df = pd.read_sql(summary_query, conn, params=[market])
+        
+        if not summary_df.empty:
+            # Create tabs for different prediction horizons
+            tabs = st.tabs(["📈 1-Day", "📊 3-Day", "📉 7-Day", "📋 All Models"])
+            
+            for idx, (tab, days) in enumerate(zip(tabs[:3], [1, 3, 7])):
+                with tab:
+                    day_data = summary_df[summary_df['days_ahead'] == days]
+                    if not day_data.empty:
+                        # Show metrics
+                        cols = st.columns(4)
+                        best_model = day_data.iloc[0]
+                        
+                        with cols[0]:
+                            st.metric("🏆 Best Model", best_model['model_name'])
+                        with cols[1]:
+                            st.metric("📍 MAE", f"{best_model['avg_mae']:.4f}")
+                        with cols[2]:
+                            st.metric("📐 RMSE", f"{best_model['avg_rmse']:.4f}")
+                        with cols[3]:
+                            direction_emoji = "✅" if best_model['direction_accuracy'] > 60 else "⚠️"
+                            st.metric(f"{direction_emoji} Direction Accuracy", f"{best_model['direction_accuracy']:.1f}%")
+                        
+                        # Show all models for this timeframe
+                        st.dataframe(
+                            day_data[['model_name', 'completed_predictions', 'avg_mae', 'avg_rmse', 
+                                     'avg_error_pct', 'direction_accuracy']],
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    else:
+                        st.info(f"No completed {days}-day predictions yet. Check back after predictions mature.")
+            
+            # All models tab
+            with tabs[3]:
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("📊 No prediction history available yet. Run the daily prediction job to start collecting data.")
+        
+        # Recent predictions vs actuals for this stock
+        st.markdown(f"### 🔍 Recent Predictions vs Actual Results - {ticker}")
+        
+        recent_query = """
+        SELECT TOP 50
+            prediction_date,
+            target_date,
+            days_ahead,
+            model_name,
+            current_price,
+            predicted_price,
+            predicted_change_pct,
+            actual_price,
+            actual_change_pct,
+            CASE 
+                WHEN direction_correct = 1 THEN '✅ Correct'
+                WHEN direction_correct = 0 THEN '❌ Wrong'
+                ELSE '⏳ Pending'
+            END as direction,
+            CASE 
+                WHEN actual_price IS NOT NULL THEN ROUND(percentage_error, 2)
+                ELSE NULL
+            END as error_pct
+        FROM ai_prediction_history
+        WHERE market = ? AND ticker = ?
+        ORDER BY prediction_date DESC, days_ahead
+        """
+        
+        recent_df = pd.read_sql(recent_query, conn, params=[market, ticker])
+        
+        if not recent_df.empty:
+            # Add color coding for direction
+            def color_direction(val):
+                if val == '✅ Correct':
+                    return 'background-color: #90EE90'
+                elif val == '❌ Wrong':
+                    return 'background-color: #FFB6C6'
+                else:
+                    return 'background-color: #FFE4B5'
+            
+            styled_df = recent_df.style.applymap(color_direction, subset=['direction'])
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+            
+            # Show accuracy statistics for this stock
+            completed = recent_df[recent_df['actual_price'].notna()]
+            if len(completed) > 0:
+                st.markdown("#### 📊 Accuracy Statistics for this Stock")
+                cols = st.columns(4)
+                
+                with cols[0]:
+                    total_completed = len(completed)
+                    st.metric("Total Predictions", total_completed)
+                
+                with cols[1]:
+                    correct_direction = len(completed[completed['direction'] == '✅ Correct'])
+                    direction_pct = (correct_direction / total_completed * 100) if total_completed > 0 else 0
+                    st.metric("Direction Accuracy", f"{direction_pct:.1f}%")
+                
+                with cols[2]:
+                    avg_error = completed['error_pct'].mean()
+                    st.metric("Avg Error %", f"{avg_error:.2f}%")
+                
+                with cols[3]:
+                    best_model = completed.groupby('model_name')['error_pct'].mean().idxmin()
+                    st.metric("Best Model", best_model)
+        else:
+            st.info(f"📊 No predictions found for {ticker}. The daily job will generate predictions automatically.")
+        
+        # Prediction timeline chart
+        if not recent_df.empty and len(recent_df[recent_df['actual_price'].notna()]) > 0:
+            st.markdown("### 📈 Prediction Accuracy Over Time")
+            
+            completed_df = recent_df[recent_df['actual_price'].notna()].copy()
+            completed_df['prediction_date'] = pd.to_datetime(completed_df['prediction_date'])
+            
+            # Create chart data
+            import plotly.graph_objects as go
+            
+            fig = go.Figure()
+            
+            # Add traces for each model
+            for model in completed_df['model_name'].unique():
+                model_data = completed_df[completed_df['model_name'] == model]
+                fig.add_trace(go.Scatter(
+                    x=model_data['prediction_date'],
+                    y=model_data['error_pct'],
+                    mode='lines+markers',
+                    name=model,
+                    line=dict(width=2),
+                    marker=dict(size=8)
+                ))
+            
+            fig.update_layout(
+                title=f"Prediction Error % Over Time - {ticker}",
+                xaxis_title="Prediction Date",
+                yaxis_title="Error Percentage",
+                hovermode='x unified',
+                height=400
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        conn.close()
+        
+    except Exception as e:
+        st.error(f"Error loading prediction history: {str(e)}")
+        st.info("💡 Make sure you've created the prediction history table by running 'create_prediction_history_table.sql'")
+
+
 def show_ml_prediction_page():
     """Show the ML-based price prediction page with enhanced models"""
     import numpy as np
@@ -4633,6 +4903,14 @@ def show_ml_prediction_page():
     
     ---
     """)
+    
+    # Add Prediction Accuracy History Section
+    st.markdown("## 📊 Historical Prediction Accuracy (Backtesting)")
+    
+    show_backtest_tab = st.checkbox("🔍 Show Prediction Accuracy Analysis", value=False)
+    
+    if show_backtest_tab:
+        show_prediction_backtesting(index_option, selected_ticker)
     
     # Display available advanced models
     st.sidebar.markdown("### 🔬 Advanced Models Status")
@@ -5464,19 +5742,28 @@ def show_flight_status_page():
     
     with st.expander("ℹ️ How to Read the Dashboard", expanded=False):
         st.markdown("""
-        **Signal Score**: -5 to +5
-        - **+4,+5**: Strong Buy
-        - **+1 to +3**: Buy
-        - **0**: Hold/Neutral
-        - **-1 to -3**: Sell
-        - **-4,-5**: Strong Sell
+        **Enhanced Signal Score**: -10 to +10 (7 indicators combined!)
+        - **+6 to +10**: Strong Buy (Multiple strong bullish signals)
+        - **+1 to +5**: Buy (Moderate bullish signals)
+        - **0**: Hold/Neutral (No clear direction)
+        - **-1 to -5**: Sell (Moderate bearish signals)
+        - **-6 to -10**: Strong Sell (Multiple strong bearish signals)
         
-        **Technical Indicators**:
-        - **RSI**: Momentum (30-70 normal)
-        - **MACD**: Trend direction
-        - **SMA**: Long-term trend vs 200-day
+        **Technical Indicators Included** (How Score is Calculated):
         
-        **Data Sources**: Your SQL Server database views
+        Each indicator contributes to the total score:
+        - **RSI** (±1): Buy if <30, Sell if >70
+        - **MACD** (±1): Buy if MACD > Signal Line, Sell if <
+        - **Bollinger Bands** (±1): Buy if price < Lower Band, Sell if > Upper Band
+        - **SMA** (±1): Buy if SMA50 > SMA200, Sell if <
+        - **Fibonacci** (±1 or ±2): Strong signals weighted 2x
+        - **Stochastic** (±1): Buy/Sell based on K/D crossover
+        - **MA Crossover** (±1 or ±2): Golden Cross (buy 2x), Death Cross (sell 2x)
+        
+        **Maximum Score**: +10 (all indicators strongly bullish)  
+        **Minimum Score**: -10 (all indicators strongly bearish)
+        
+        **Data Sources**: Your SQL Server database views (real-time technical analysis)
         """)
     
     # Index and Ticker Selection
@@ -5489,9 +5776,15 @@ def show_flight_status_page():
             help="Choose which market index to analyze"
         )
     
-    # Load data first to get available tickers
-    with st.spinner(f"🛩️ Loading flight status for {index_name}..."):
-        df = load_flight_status_data(index_name, limit=None)  # Load all stocks
+    # Performance option
+    with col2:
+        load_all = st.checkbox("Load All Stocks", value=False, 
+                              help="Uncheck to load top 100 stocks only (faster)")
+    
+    # Load data with performance optimization
+    limit_val = None if load_all else 100
+    with st.spinner(f"🛩️ Loading {'all' if load_all else 'top 100'} stocks for {index_name}..."):
+        df = load_flight_status_data(index_name, limit=limit_val)
     
     # Ticker filter - only show after data is loaded
     with col2:
@@ -5533,21 +5826,56 @@ def show_flight_status_page():
     # Main flight status table
     st.subheader(f"🛩️ Flight Status Board ({len(filtered_df)} stocks)")
     
-    # Prepare display data
+    # Prepare display data with all indicators
     display_df = filtered_df.copy()
     display_df['Status'] = display_df['signal_score'].apply(get_flight_status_emoji)
     display_df['Signal Score'] = display_df['signal_score']
-    display_df['RSI'] = display_df['RSI'].round(1)
-    display_df['Change %'] = display_df['daily_change_pct'].round(2)
     display_df['Price'] = display_df['close_price'].round(2)
+    display_df['Change %'] = display_df['daily_change_pct'].round(2)
     
-    # Select columns for display
+    # Round indicator values for clean display
+    if 'RSI' in display_df.columns:
+        display_df['RSI'] = display_df['RSI'].round(1)
+    if 'MACD' in display_df.columns:
+        display_df['MACD'] = display_df['MACD'].round(3)
+    if 'MACD_Signal_Line' in display_df.columns:
+        display_df['MACD_Signal_Line'] = display_df['MACD_Signal_Line'].round(3)
+    if 'SMA_50' in display_df.columns:
+        display_df['SMA_50'] = display_df['SMA_50'].round(2)
+    if 'SMA_200' in display_df.columns:
+        display_df['SMA_200'] = display_df['SMA_200'].round(2)
+    if 'Upper_Band' in display_df.columns:
+        display_df['Upper_Band'] = display_df['Upper_Band'].round(2)
+    if 'Lower_Band' in display_df.columns:
+        display_df['Lower_Band'] = display_df['Lower_Band'].round(2)
+    if 'stoch_14d_k' in display_df.columns:
+        display_df['Stoch_K'] = display_df['stoch_14d_k'].round(1)
+    if 'stoch_14d_d' in display_df.columns:
+        display_df['Stoch_D'] = display_df['stoch_14d_d'].round(1)
+    
+    # Comprehensive column list with all indicators
     columns_to_show = [
         'Status', 'ticker', 'company', 'Signal Score', 'Price', 'Change %',
-        'RSI', 'rsi_status', 'macd_trend', 'long_term_trend', 'last_update'
+        # RSI Indicators
+        'RSI', 'rsi_signal', 'rsi_status',
+        # MACD Indicators
+        'MACD', 'MACD_Signal_Line', 'macd_signal', 'macd_trend',
+        # SMA/EMA Indicators
+        'SMA_50', 'SMA_200', 'sma_signal', 'ma_crossover_signal', 'long_term_trend',
+        # Bollinger Bands
+        'Upper_Band', 'Lower_Band', 'bb_signal',
+        # Fibonacci
+        'fib_position', 'fib_trade_signal', 'distance_to_nearest_fib_pct',
+        # Stochastic
+        'Stoch_K', 'Stoch_D', 'stoch_status', 'stoch_trade_signal',
+        # Other
+        'volume', 'last_update'
     ]
     
-    # Display the table
+    # Filter columns that actually exist in the dataframe
+    columns_to_show = [col for col in columns_to_show if col in display_df.columns]
+    
+    # Display the comprehensive table with all indicators
     st.dataframe(
         display_df[columns_to_show],
         use_container_width=True,
@@ -5555,44 +5883,211 @@ def show_flight_status_page():
         column_config={
             'Status': st.column_config.TextColumn(
                 '✈️ Status',
-                help='Flight departure status'
+                help='Flight departure status',
+                width='small'
             ),
             'ticker': st.column_config.TextColumn(
                 '🏷️ Symbol',
-                help='Stock ticker symbol'
+                help='Stock ticker symbol',
+                width='small'
             ),
             'company': st.column_config.TextColumn(
                 '🏢 Company',
-                help='Company name'
+                help='Company name',
+                width='medium'
             ),
             'Signal Score': st.column_config.NumberColumn(
                 '📊 Score',
-                help='Combined signal strength (-5 to +5)',
-                min_value=-5,
-                max_value=5,
-                format='%d'
+                help='Combined signal strength (-10 to +10) - includes all 7 indicators',
+                min_value=-10,
+                max_value=10,
+                format='%d',
+                width='small'
             ),
             'Price': st.column_config.NumberColumn(
                 '💰 Price',
                 help='Latest close price',
-                format='$%.2f'
+                format='$%.2f',
+                width='small'
             ),
             'Change %': st.column_config.NumberColumn(
-                '📈 Change %',
+                '📈 Δ%',
                 help='Daily change percentage',
-                format='%.2f%%'
+                format='%.2f%%',
+                width='small'
             ),
+            # RSI
             'RSI': st.column_config.NumberColumn(
                 '📊 RSI',
-                help='Relative Strength Index',
-                format='%.1f'
+                help='Relative Strength Index (30=oversold, 70=overbought)',
+                format='%.1f',
+                width='small'
+            ),
+            'rsi_signal': st.column_config.TextColumn(
+                'RSI Signal',
+                help='Buy/Sell/Hold from RSI',
+                width='small'
+            ),
+            'rsi_status': st.column_config.TextColumn(
+                'RSI Status',
+                help='Overbought/Oversold/Neutral',
+                width='small'
+            ),
+            # MACD
+            'MACD': st.column_config.NumberColumn(
+                '📈 MACD',
+                help='MACD line value',
+                format='%.3f',
+                width='small'
+            ),
+            'MACD_Signal_Line': st.column_config.NumberColumn(
+                'MACD Signal',
+                help='MACD Signal line',
+                format='%.3f',
+                width='small'
+            ),
+            'macd_signal': st.column_config.TextColumn(
+                'MACD Trade',
+                help='MACD trading signal',
+                width='small'
+            ),
+            'macd_trend': st.column_config.TextColumn(
+                'MACD Trend',
+                help='Bullish/Bearish/Neutral',
+                width='small'
+            ),
+            # SMA/EMA
+            'SMA_50': st.column_config.NumberColumn(
+                '📉 SMA 50',
+                help='50-day Simple Moving Average',
+                format='%.2f',
+                width='small'
+            ),
+            'SMA_200': st.column_config.NumberColumn(
+                '📉 SMA 200',
+                help='200-day Simple Moving Average',
+                format='%.2f',
+                width='small'
+            ),
+            'sma_signal': st.column_config.TextColumn(
+                'SMA Signal',
+                help='SMA trading signal',
+                width='small'
+            ),
+            'ma_crossover_signal': st.column_config.TextColumn(
+                'MA Cross',
+                help='Golden/Death Cross signal (weighted 2x)',
+                width='small'
+            ),
+            'long_term_trend': st.column_config.TextColumn(
+                'LT Trend',
+                help='Long-term trend vs SMA 200',
+                width='small'
+            ),
+            # Bollinger Bands
+            'Upper_Band': st.column_config.NumberColumn(
+                'BB Upper',
+                help='Bollinger Band upper limit',
+                format='%.2f',
+                width='small'
+            ),
+            'Lower_Band': st.column_config.NumberColumn(
+                'BB Lower',
+                help='Bollinger Band lower limit',
+                format='%.2f',
+                width='small'
+            ),
+            'bb_signal': st.column_config.TextColumn(
+                'BB Signal',
+                help='Bollinger Bands signal',
+                width='small'
+            ),
+            # Fibonacci
+            'fib_position': st.column_config.TextColumn(
+                '🔢 Fib Position',
+                help='Position relative to Fibonacci levels',
+                width='small'
+            ),
+            'fib_trade_signal': st.column_config.TextColumn(
+                'Fib Signal',
+                help='Fibonacci trading signal (weighted 2x for STRONG)',
+                width='small'
+            ),
+            'distance_to_nearest_fib_pct': st.column_config.NumberColumn(
+                'Fib Dist %',
+                help='Distance to nearest Fibonacci level',
+                format='%.1f%%',
+                width='small'
+            ),
+            # Stochastic
+            'Stoch_K': st.column_config.NumberColumn(
+                '📊 Stoch K',
+                help='Stochastic %K (14-day)',
+                format='%.1f',
+                width='small'
+            ),
+            'Stoch_D': st.column_config.NumberColumn(
+                'Stoch D',
+                help='Stochastic %D (14-day)',
+                format='%.1f',
+                width='small'
+            ),
+            'stoch_status': st.column_config.TextColumn(
+                'Stoch Status',
+                help='Stochastic status',
+                width='small'
+            ),
+            'stoch_trade_signal': st.column_config.TextColumn(
+                'Stoch Signal',
+                help='Stochastic trading signal',
+                width='small'
+            ),
+            # Other
+            'volume': st.column_config.NumberColumn(
+                '📊 Volume',
+                help='Trading volume',
+                format='%d',
+                width='small'
             ),
             'last_update': st.column_config.DatetimeColumn(
                 '📅 Updated',
-                help='Last update timestamp'
+                help='Last update timestamp',
+                width='small'
             )
         }
     )
+    
+    # Score Breakdown Legend
+    with st.expander("📊 Understanding Signal Score Breakdown", expanded=False):
+        st.markdown("""
+        ### How to Read the Table
+        
+        **Each row shows a stock with ALL technical indicators that contribute to its Signal Score:**
+        
+        #### Core Indicators (±1 each):
+        - **RSI (30-70)**: Shows momentum - values and Buy/Sell/Hold signal
+        - **MACD**: Trend strength - shows MACD value, Signal Line, and trend
+        - **SMA 50/200**: Moving averages - compare price position and crossovers
+        - **Bollinger Bands**: Shows Upper/Lower bands and price position
+        
+        #### Enhanced Indicators (weighted):
+        - **Fibonacci** (±1 or ±2): Position relative to Fib levels - STRONG signals count 2x
+        - **Stochastic** (±1): K and D values show overbought/oversold
+        - **MA Crossover** (±1 or ±2): Golden/Death Cross detection - counts 2x
+        
+        #### Example Score Calculation:
+        If a stock has Signal Score = **+7**, it might be:
+        - RSI < 30 (Buy) = +1
+        - MACD > Signal (Buy) = +1
+        - Price < BB Lower (Buy) = +1
+        - SMA50 > SMA200 (Buy) = +1
+        - Fibonacci STRONG_BUY = +2
+        - Stochastic Buy = +1
+        - Golden Cross = +2
+        - **Total = +9** (but -2 from other factors = 7)
+        
+        💡 **Tip**: Scroll right to see all indicator columns and their signals!
+        """)
     
     # Export functionality
     if st.button("📥 Export to CSV", key="flight_export_csv"):
@@ -6726,11 +7221,11 @@ def get_ai_trading_signals_data(market: str, analysis_date: str) -> pd.DataFrame
 
 
 def show_ai_trading_signals_scanner():
-    """Show AI Trading Signals Scanner page with crossover-based signal detection"""
+    """Show Double/Triple Strategy page with crossover-based signal detection"""
     st.markdown("""
-    # 🤖 AI Trading Signals Scanner
+    # 🎯 Double/Triple Strategy
     
-    ### AI-Powered Crossover Signal Detection
+    ### Multi-Indicator Crossover Signal Detection
     
     Find actionable trading opportunities using AI crossover signals from:
     - **MACD**: Crossover events (not just position)
@@ -9062,6 +9557,453 @@ def show_family_assets_page():
         st.info("Please check your database connection.")
 
 
+def show_backtesting_analytics_dashboard():
+    """
+    Comprehensive Backtesting Analytics Dashboard with Power BI-style filters and visualizations
+    """
+    st.markdown("""
+    # 📊 AI Prediction Backtesting Analytics
+    
+    ### Interactive dashboard to analyze prediction accuracy across models, markets, and timeframes
+    """)
+    
+    try:
+        conn = get_db_connection()
+        
+        # Check if table exists
+        check_query = """
+        SELECT COUNT(*) as count 
+        FROM INFORMATION_SCHEMA.TABLES 
+        WHERE TABLE_NAME = 'ai_prediction_history'
+        """
+        table_check = pd.read_sql(check_query, conn)
+        
+        if table_check['count'].iloc[0] == 0:
+            st.warning("⚠️ Prediction history table not found!")
+            st.info("Run the setup script first: `sqlcmd -S localhost\\MSSQLSERVER01 -d stockdata_db -i create_prediction_history_table.sql`")
+            return
+        
+        # Load all prediction data
+        data_query = """
+        SELECT 
+            prediction_id,
+            market,
+            ticker,
+            company_name,
+            prediction_date,
+            target_date,
+            days_ahead,
+            model_name,
+            current_price,
+            predicted_price,
+            predicted_change_pct,
+            actual_price,
+            actual_change_pct,
+            absolute_error,
+            squared_error,
+            percentage_error,
+            direction_correct,
+            model_confidence,
+            created_at
+        FROM ai_prediction_history
+        ORDER BY prediction_date DESC
+        """
+        
+        df = pd.read_sql(data_query, conn)
+        
+        if df.empty:
+            st.info("📊 No prediction data available yet. Run the daily prediction job to generate predictions.")
+            st.code("python daily_prediction_job.py", language="bash")
+            return
+        
+        # Convert dates
+        df['prediction_date'] = pd.to_datetime(df['prediction_date'])
+        df['target_date'] = pd.to_datetime(df['target_date'])
+        
+        # Calculate additional metrics
+        df['days_until_target'] = (df['target_date'] - df['prediction_date']).dt.days
+        df['is_completed'] = df['actual_price'].notna()
+        df['direction_status'] = df['direction_correct'].map({
+            1: '✅ Correct',
+            0: '❌ Wrong',
+            None: '⏳ Pending'
+        })
+        
+        # =====================
+        # FILTERS / SLICERS
+        # =====================
+        st.markdown("## 🎚️ Filters & Slicers")
+        
+        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+        
+        with filter_col1:
+            selected_markets = st.multiselect(
+                "🌍 Market",
+                options=sorted(df['market'].unique()),
+                default=sorted(df['market'].unique())
+            )
+        
+        with filter_col2:
+            selected_models = st.multiselect(
+                "🤖 Model",
+                options=sorted(df['model_name'].unique()),
+                default=sorted(df['model_name'].unique())
+            )
+        
+        with filter_col3:
+            selected_timeframes = st.multiselect(
+                "📅 Days Ahead",
+                options=sorted(df['days_ahead'].unique()),
+                default=sorted(df['days_ahead'].unique())
+            )
+        
+        with filter_col4:
+            completion_filter = st.selectbox(
+                "📊 Status",
+                options=["All", "Completed Only", "Pending Only"],
+                index=0
+            )
+        
+        # Date range filter
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            start_date = st.date_input(
+                "📅 Prediction Start Date",
+                value=df['prediction_date'].min().date()
+            )
+        with date_col2:
+            end_date = st.date_input(
+                "📅 Prediction End Date",
+                value=df['prediction_date'].max().date()
+            )
+        
+        # Ticker search
+        ticker_search = st.text_input("🔍 Search Ticker (comma-separated)", placeholder="e.g., AAPL, MSFT, GOOGL")
+        
+        st.markdown("---")
+        
+        # Apply filters
+        filtered_df = df[
+            (df['market'].isin(selected_markets)) &
+            (df['model_name'].isin(selected_models)) &
+            (df['days_ahead'].isin(selected_timeframes)) &
+            (df['prediction_date'].dt.date >= start_date) &
+            (df['prediction_date'].dt.date <= end_date)
+        ]
+        
+        if completion_filter == "Completed Only":
+            filtered_df = filtered_df[filtered_df['is_completed'] == True]
+        elif completion_filter == "Pending Only":
+            filtered_df = filtered_df[filtered_df['is_completed'] == False]
+        
+        if ticker_search:
+            tickers = [t.strip().upper() for t in ticker_search.split(',')]
+            filtered_df = filtered_df[filtered_df['ticker'].str.upper().isin(tickers)]
+        
+        # Show filter results
+        st.info(f"📊 Showing **{len(filtered_df):,}** predictions (filtered from {len(df):,} total)")
+        
+        # =====================
+        # KEY METRICS
+        # =====================
+        st.markdown("## 📈 Key Performance Metrics")
+        
+        completed_df = filtered_df[filtered_df['is_completed'] == True]
+        
+        metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
+        
+        with metric_col1:
+            total_predictions = len(filtered_df)
+            st.metric("Total Predictions", f"{total_predictions:,}")
+        
+        with metric_col2:
+            completed_count = len(completed_df)
+            completion_rate = (completed_count / total_predictions * 100) if total_predictions > 0 else 0
+            st.metric("Completed", f"{completed_count:,}", f"{completion_rate:.1f}%")
+        
+        with metric_col3:
+            if len(completed_df) > 0:
+                avg_mae = completed_df['absolute_error'].mean()
+                st.metric("Avg MAE", f"{avg_mae:.4f}")
+            else:
+                st.metric("Avg MAE", "N/A")
+        
+        with metric_col4:
+            if len(completed_df) > 0:
+                avg_rmse = np.sqrt(completed_df['squared_error'].mean())
+                st.metric("Avg RMSE", f"{avg_rmse:.4f}")
+            else:
+                st.metric("Avg RMSE", "N/A")
+        
+        with metric_col5:
+            if len(completed_df) > 0:
+                direction_accuracy = (completed_df['direction_correct'].sum() / len(completed_df) * 100)
+                emoji = "🟢" if direction_accuracy >= 60 else "🟡" if direction_accuracy >= 50 else "🔴"
+                st.metric("Direction Accuracy", f"{emoji} {direction_accuracy:.1f}%")
+            else:
+                st.metric("Direction Accuracy", "N/A")
+        
+        st.markdown("---")
+        
+        # =====================
+        # VISUALIZATIONS
+        # =====================
+        
+        if len(completed_df) > 0:
+            # Tab-based layout for different views
+            tab1, tab2, tab3, tab4 = st.tabs([
+                "📊 Model Comparison", 
+                "📈 Accuracy Trends", 
+                "🎯 Error Analysis",
+                "📋 Detailed Data"
+            ])
+            
+            with tab1:
+                st.markdown("### 🤖 Model Performance Comparison")
+                
+                # Model accuracy comparison
+                model_stats = completed_df.groupby('model_name').agg({
+                    'absolute_error': 'mean',
+                    'squared_error': lambda x: np.sqrt(x.mean()),
+                    'percentage_error': 'mean',
+                    'direction_correct': lambda x: (x.sum() / len(x) * 100) if len(x) > 0 else 0,
+                    'prediction_id': 'count'
+                }).reset_index()
+                
+                model_stats.columns = ['Model', 'MAE', 'RMSE', 'Avg Error %', 'Direction Accuracy %', 'Count']
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # MAE comparison
+                    fig_mae = px.bar(
+                        model_stats.sort_values('MAE'),
+                        x='Model',
+                        y='MAE',
+                        title='Mean Absolute Error by Model (Lower is Better)',
+                        color='MAE',
+                        color_continuous_scale='RdYlGn_r',
+                        text='MAE'
+                    )
+                    fig_mae.update_traces(texttemplate='%{text:.4f}', textposition='outside')
+                    fig_mae.update_layout(height=400)
+                    st.plotly_chart(fig_mae, use_container_width=True)
+                
+                with col2:
+                    # Direction accuracy comparison
+                    fig_dir = px.bar(
+                        model_stats.sort_values('Direction Accuracy %', ascending=False),
+                        x='Model',
+                        y='Direction Accuracy %',
+                        title='Directional Accuracy by Model (Higher is Better)',
+                        color='Direction Accuracy %',
+                        color_continuous_scale='RdYlGn',
+                        text='Direction Accuracy %'
+                    )
+                    fig_dir.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                    fig_dir.update_layout(height=400, yaxis_range=[0, 100])
+                    st.plotly_chart(fig_dir, use_container_width=True)
+                
+                # Model stats table
+                st.dataframe(
+                    model_stats.style.background_gradient(subset=['MAE', 'RMSE'], cmap='RdYlGn_r')
+                                    .background_gradient(subset=['Direction Accuracy %'], cmap='RdYlGn')
+                                    .format({
+                                        'MAE': '{:.4f}',
+                                        'RMSE': '{:.4f}',
+                                        'Avg Error %': '{:.2f}%',
+                                        'Direction Accuracy %': '{:.1f}%',
+                                        'Count': '{:,}'
+                                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            
+            with tab2:
+                st.markdown("### 📈 Accuracy Trends Over Time")
+                
+                # Error trends over time
+                trend_df = completed_df.copy()
+                trend_df['prediction_week'] = trend_df['prediction_date'].dt.to_period('W').astype(str)
+                
+                weekly_stats = trend_df.groupby(['prediction_week', 'model_name']).agg({
+                    'percentage_error': 'mean',
+                    'direction_correct': lambda x: (x.sum() / len(x) * 100) if len(x) > 0 else 0
+                }).reset_index()
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Error % trend
+                    fig_error_trend = px.line(
+                        weekly_stats,
+                        x='prediction_week',
+                        y='percentage_error',
+                        color='model_name',
+                        title='Average Prediction Error % Over Time',
+                        markers=True
+                    )
+                    fig_error_trend.update_layout(
+                        xaxis_title="Week",
+                        yaxis_title="Error %",
+                        height=400
+                    )
+                    st.plotly_chart(fig_error_trend, use_container_width=True)
+                
+                with col2:
+                    # Direction accuracy trend
+                    fig_acc_trend = px.line(
+                        weekly_stats,
+                        x='prediction_week',
+                        y='direction_correct',
+                        color='model_name',
+                        title='Direction Accuracy Over Time',
+                        markers=True
+                    )
+                    fig_acc_trend.update_layout(
+                        xaxis_title="Week",
+                        yaxis_title="Accuracy %",
+                        height=400,
+                        yaxis_range=[0, 100]
+                    )
+                    st.plotly_chart(fig_acc_trend, use_container_width=True)
+                
+                # Market comparison
+                st.markdown("#### 📊 Performance by Market")
+                market_stats = completed_df.groupby('market').agg({
+                    'absolute_error': 'mean',
+                    'direction_correct': lambda x: (x.sum() / len(x) * 100) if len(x) > 0 else 0,
+                    'prediction_id': 'count'
+                }).reset_index()
+                market_stats.columns = ['Market', 'MAE', 'Direction Accuracy %', 'Count']
+                
+                fig_market = px.scatter(
+                    market_stats,
+                    x='MAE',
+                    y='Direction Accuracy %',
+                    size='Count',
+                    color='Market',
+                    title='Market Performance: MAE vs Direction Accuracy',
+                    text='Market',
+                    size_max=50
+                )
+                fig_market.update_traces(textposition='top center')
+                fig_market.update_layout(height=400)
+                st.plotly_chart(fig_market, use_container_width=True)
+            
+            with tab3:
+                st.markdown("### 🎯 Error Distribution Analysis")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Error distribution histogram
+                    fig_hist = px.histogram(
+                        completed_df,
+                        x='percentage_error',
+                        nbins=50,
+                        title='Distribution of Prediction Errors',
+                        color='model_name',
+                        barmode='overlay',
+                        opacity=0.7
+                    )
+                    fig_hist.update_layout(
+                        xaxis_title="Error %",
+                        yaxis_title="Frequency",
+                        height=400
+                    )
+                    st.plotly_chart(fig_hist, use_container_width=True)
+                
+                with col2:
+                    # Box plot by timeframe
+                    fig_box = px.box(
+                        completed_df,
+                        x='days_ahead',
+                        y='percentage_error',
+                        color='model_name',
+                        title='Error Distribution by Prediction Horizon'
+                    )
+                    fig_box.update_layout(
+                        xaxis_title="Days Ahead",
+                        yaxis_title="Error %",
+                        height=400
+                    )
+                    st.plotly_chart(fig_box, use_container_width=True)
+                
+                # Heatmap of win rates
+                st.markdown("#### 🔥 Win Rate Heatmap (Direction Accuracy %)")
+                
+                heatmap_data = completed_df.groupby(['model_name', 'days_ahead'])['direction_correct'].apply(
+                    lambda x: (x.sum() / len(x) * 100) if len(x) > 0 else 0
+                ).reset_index()
+                
+                heatmap_pivot = heatmap_data.pivot(
+                    index='model_name',
+                    columns='days_ahead',
+                    values='direction_correct'
+                )
+                
+                fig_heatmap = px.imshow(
+                    heatmap_pivot,
+                    labels=dict(x="Days Ahead", y="Model", color="Accuracy %"),
+                    title="Directional Accuracy Heatmap",
+                    color_continuous_scale='RdYlGn',
+                    aspect="auto",
+                    text_auto='.1f'
+                )
+                fig_heatmap.update_layout(height=400)
+                st.plotly_chart(fig_heatmap, use_container_width=True)
+            
+            with tab4:
+                st.markdown("### 📋 Detailed Prediction Data")
+                
+                # Download button
+                csv = completed_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Data as CSV",
+                    data=csv,
+                    file_name=f"backtesting_data_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+                
+                # Display table with formatting
+                display_df = completed_df[[
+                    'prediction_date', 'target_date', 'market', 'ticker', 'model_name',
+                    'days_ahead', 'current_price', 'predicted_price', 'actual_price',
+                    'predicted_change_pct', 'actual_change_pct', 'percentage_error',
+                    'direction_status'
+                ]].copy()
+                
+                display_df = display_df.sort_values('prediction_date', ascending=False)
+                
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "prediction_date": st.column_config.DateColumn("Prediction Date", format="YYYY-MM-DD"),
+                        "target_date": st.column_config.DateColumn("Target Date", format="YYYY-MM-DD"),
+                        "current_price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
+                        "predicted_price": st.column_config.NumberColumn("Predicted Price", format="$%.2f"),
+                        "actual_price": st.column_config.NumberColumn("Actual Price", format="$%.2f"),
+                        "predicted_change_pct": st.column_config.NumberColumn("Predicted %", format="%.2f%%"),
+                        "actual_change_pct": st.column_config.NumberColumn("Actual %", format="%.2f%%"),
+                        "percentage_error": st.column_config.NumberColumn("Error %", format="%.2f%%")
+                    }
+                )
+        
+        else:
+            st.warning("⏳ No completed predictions found with the current filters. Predictions need time to mature before accuracy can be measured.")
+            st.info(f"📊 You have **{len(filtered_df):,}** pending predictions waiting for target dates to arrive.")
+        
+        conn.close()
+        
+    except Exception as e:
+        st.error(f"❌ Error loading backtesting analytics: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+
+
 # Main application routing
 if page == "🏠 Home & Filters":
     show_home_page()
@@ -9069,16 +10011,19 @@ elif page == "📋 Data in Table format":
     show_data_table_page()
 elif page == "📈 Technical Analysis":
     show_technical_analysis_page()
-elif page == "🤖 AI Price Predictions":
-    show_ml_prediction_page()
-elif page == "🛩️ Flight Status Dashboard":
+# elif page == "🤖 AI Price Predictions":
+#     show_ml_prediction_page()  # REMOVED - Use Backtesting Analytics instead
+elif page == "� Backtesting Analytics":
+    show_backtesting_analytics_dashboard()
+elif page == "�🛩️ Flight Status Dashboard":
     show_flight_status_page()
-elif page == "📊 NASDAQ ML Predictions":
-    show_nasdaq_ml_predictions_page()
-elif page == "📈 NSE ML Predictions":
-    show_nse_ml_predictions_page()
-elif page == "💱 Forex ML Predictions":
-    show_forex_ml_predictions_page()
+# REMOVED - Use Backtesting Analytics for all ML predictions (NSE, NASDAQ, Forex)
+# elif page == "📊 NASDAQ ML Predictions":
+#     show_nasdaq_ml_predictions_page()
+# elif page == "📈 NSE ML Predictions":
+#     show_nse_ml_predictions_page()
+# elif page == "💱 Forex ML Predictions":
+#     show_forex_ml_predictions_page()
 elif page == "📊 Reco Tracking and Current Status":
     show_reco_tracking_page()
 elif page == "📈 Today Trend Recommendations":
@@ -9091,6 +10036,6 @@ elif page == "� Stock Notes & Journal":
     show_stock_notes_journal()
 elif page == "�👨‍👩‍👧‍👦 For Family":
     show_family_assets_page()
-elif page == "🤖 AI Trading Signals Scanner":
+elif page == "🎯 Double/Triple Strategy":
     show_ai_trading_signals_scanner()
 
