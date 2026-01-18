@@ -4635,7 +4635,7 @@ def show_prediction_backtesting(market, ticker):
     import pandas as pd
     
     try:
-        conn = get_db_connection()
+        conn = get_connection()
         
         # Overall model performance summary
         st.markdown("### 🎯 Model Performance Summary (All Time)")
@@ -9568,7 +9568,7 @@ def show_backtesting_analytics_dashboard():
     """)
     
     try:
-        conn = get_db_connection()
+        conn = get_connection()
         
         # Check if table exists
         check_query = """
@@ -9677,8 +9677,24 @@ def show_backtesting_analytics_dashboard():
                 value=df['prediction_date'].max().date()
             )
         
-        # Ticker search
-        ticker_search = st.text_input("🔍 Search Ticker (comma-separated)", placeholder="e.g., AAPL, MSFT, GOOGL")
+        # Ticker dropdown with search capability
+        ticker_col1, ticker_col2 = st.columns([3, 1])
+        with ticker_col1:
+            # Get unique tickers with company names
+            ticker_options = df[['ticker', 'company_name']].drop_duplicates().sort_values('ticker')
+            ticker_options['display'] = ticker_options['ticker'] + ' - ' + ticker_options['company_name']
+            
+            selected_tickers = st.multiselect(
+                "🔍 Select Tickers (searchable)",
+                options=['All'] + ticker_options['ticker'].tolist(),
+                default=['All'],
+                help="Search and select specific tickers, or leave 'All' selected to show all stocks"
+            )
+        
+        with ticker_col2:
+            st.markdown("&nbsp;")  # Spacing
+            if st.button("🔄 Clear Ticker Filter"):
+                st.rerun()
         
         st.markdown("---")
         
@@ -9696,9 +9712,9 @@ def show_backtesting_analytics_dashboard():
         elif completion_filter == "Pending Only":
             filtered_df = filtered_df[filtered_df['is_completed'] == False]
         
-        if ticker_search:
-            tickers = [t.strip().upper() for t in ticker_search.split(',')]
-            filtered_df = filtered_df[filtered_df['ticker'].str.upper().isin(tickers)]
+        # Apply ticker filter
+        if 'All' not in selected_tickers and selected_tickers:
+            filtered_df = filtered_df[filtered_df['ticker'].isin(selected_tickers)]
         
         # Show filter results
         st.info(f"📊 Showing **{len(filtered_df):,}** predictions (filtered from {len(df):,} total)")
@@ -9746,20 +9762,60 @@ def show_backtesting_analytics_dashboard():
         st.markdown("---")
         
         # =====================
-        # VISUALIZATIONS
+        # VISUALIZATIONS & DATA
         # =====================
         
-        if len(completed_df) > 0:
-            # Tab-based layout for different views
-            tab1, tab2, tab3, tab4 = st.tabs([
-                "📊 Model Comparison", 
-                "📈 Accuracy Trends", 
-                "🎯 Error Analysis",
-                "📋 Detailed Data"
-            ])
+        # Tab-based layout for different views
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "📋 All Predictions", 
+            "📊 Model Comparison", 
+            "📈 Accuracy Trends", 
+            "🎯 Error Analysis",
+            "📥 Export Data"
+        ])
+        
+        with tab1:
+            st.markdown("### 📋 All Predictions (Completed & Pending)")
             
-            with tab1:
-                st.markdown("### 🤖 Model Performance Comparison")
+            # Show all predictions in filtered dataset
+            display_df = filtered_df[[
+                'prediction_date', 'target_date', 'market', 'ticker', 'company_name',
+                'days_ahead', 'model_name', 'current_price', 'predicted_price', 
+                'predicted_change_pct', 'actual_price', 'actual_change_pct',
+                'model_confidence', 'direction_status'
+            ]].copy()
+            
+            # Format dates
+            display_df['prediction_date'] = display_df['prediction_date'].dt.strftime('%Y-%m-%d')
+            display_df['target_date'] = display_df['target_date'].dt.strftime('%Y-%m-%d')
+            
+            # Format numbers
+            display_df['current_price'] = display_df['current_price'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+            display_df['predicted_price'] = display_df['predicted_price'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+            display_df['actual_price'] = display_df['actual_price'].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "⏳ Pending")
+            display_df['predicted_change_pct'] = display_df['predicted_change_pct'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A")
+            display_df['actual_change_pct'] = display_df['actual_change_pct'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "⏳ Pending")
+            display_df['model_confidence'] = display_df['model_confidence'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+            
+            # Rename columns for display
+            display_df.columns = [
+                'Prediction Date', 'Target Date', 'Market', 'Ticker', 'Company',
+                'Days Ahead', 'Model', 'Current Price', 'Predicted Price', 
+                'Predicted Change', 'Actual Price', 'Actual Change',
+                'Confidence', 'Direction'
+            ]
+            
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                height=600
+            )
+            
+            st.info(f"📊 Showing {len(display_df):,} predictions | ✅ {len(completed_df):,} completed | ⏳ {len(filtered_df) - len(completed_df):,} pending")
+        
+        if len(completed_df) > 0:
+            with tab2:
+                st.markdown("### 🤖 Model Performance Comparison (Completed Predictions Only)")
                 
                 # Model accuracy comparison
                 model_stats = completed_df.groupby('model_name').agg({
@@ -9891,8 +9947,9 @@ def show_backtesting_analytics_dashboard():
                 fig_market.update_layout(height=400)
                 st.plotly_chart(fig_market, use_container_width=True)
             
-            with tab3:
-                st.markdown("### 🎯 Error Distribution Analysis")
+            
+            with tab4:
+                st.markdown("### 🎯 Error Distribution Analysis (Completed Predictions Only)")
                 
                 col1, col2 = st.columns(2)
                 
@@ -9954,47 +10011,46 @@ def show_backtesting_analytics_dashboard():
                 fig_heatmap.update_layout(height=400)
                 st.plotly_chart(fig_heatmap, use_container_width=True)
             
-            with tab4:
-                st.markdown("### 📋 Detailed Prediction Data")
+            with tab5:
+                st.markdown("### 📥 Export Prediction Data")
                 
-                # Download button
-                csv = completed_df.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download Data as CSV",
-                    data=csv,
-                    file_name=f"backtesting_data_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv"
-                )
+                export_col1, export_col2 = st.columns(2)
                 
-                # Display table with formatting
-                display_df = completed_df[[
-                    'prediction_date', 'target_date', 'market', 'ticker', 'model_name',
-                    'days_ahead', 'current_price', 'predicted_price', 'actual_price',
-                    'predicted_change_pct', 'actual_change_pct', 'percentage_error',
-                    'direction_status'
-                ]].copy()
+                with export_col1:
+                    st.markdown("#### All Predictions (Completed & Pending)")
+                    csv_all = filtered_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download All Predictions CSV",
+                        data=csv_all,
+                        file_name=f"all_predictions_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        key="download_all"
+                    )
+                    st.info(f"Contains {len(filtered_df):,} predictions")
                 
-                display_df = display_df.sort_values('prediction_date', ascending=False)
-                
-                st.dataframe(
-                    display_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "prediction_date": st.column_config.DateColumn("Prediction Date", format="YYYY-MM-DD"),
-                        "target_date": st.column_config.DateColumn("Target Date", format="YYYY-MM-DD"),
-                        "current_price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
-                        "predicted_price": st.column_config.NumberColumn("Predicted Price", format="$%.2f"),
-                        "actual_price": st.column_config.NumberColumn("Actual Price", format="$%.2f"),
-                        "predicted_change_pct": st.column_config.NumberColumn("Predicted %", format="%.2f%%"),
-                        "actual_change_pct": st.column_config.NumberColumn("Actual %", format="%.2f%%"),
-                        "percentage_error": st.column_config.NumberColumn("Error %", format="%.2f%%")
-                    }
-                )
+                with export_col2:
+                    st.markdown("#### Completed Predictions Only")
+                    csv_completed = completed_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Completed Predictions CSV",
+                        data=csv_completed,
+                        file_name=f"completed_predictions_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        key="download_completed"
+                    )
+                    st.info(f"Contains {len(completed_df):,} completed predictions")
         
         else:
-            st.warning("⏳ No completed predictions found with the current filters. Predictions need time to mature before accuracy can be measured.")
-            st.info(f"📊 You have **{len(filtered_df):,}** pending predictions waiting for target dates to arrive.")
+            st.warning("⏳ No completed predictions found with the current filters.")
+            st.info(f"""
+            📊 You have **{len(filtered_df):,}** pending predictions waiting for target dates to arrive.
+            
+            **View them in the 'All Predictions' tab above** to see:
+            - Prediction dates and target dates
+            - Which stocks and models were used  
+            - Predicted prices and changes
+            - When actual results will be available
+            """)
         
         conn.close()
         
