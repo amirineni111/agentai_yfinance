@@ -3,6 +3,15 @@
 -- =====================================================
 -- This table tracks daily crossover signals and their accuracy
 
+-- Drop existing views first
+IF OBJECT_ID('dbo.vw_pending_signal_updates', 'V') IS NOT NULL
+    DROP VIEW dbo.vw_pending_signal_updates;
+GO
+
+IF OBJECT_ID('dbo.vw_signal_performance_summary', 'V') IS NOT NULL
+    DROP VIEW dbo.vw_signal_performance_summary;
+GO
+
 -- Drop existing table if exists
 IF OBJECT_ID('dbo.signal_tracking_history', 'U') IS NOT NULL
     DROP TABLE dbo.signal_tracking_history;
@@ -20,14 +29,18 @@ CREATE TABLE dbo.signal_tracking_history (
     
     -- Signal Details
     signal_type VARCHAR(20) NOT NULL, -- 'BULLISH' or 'BEARISH'
-    signal_strength INT NOT NULL, -- 2, 3, or 4 (number of aligned indicators)
+    signal_strength INT NOT NULL, -- 2-7 (number of aligned indicators from 7 total)
     signal_status VARCHAR(20), -- 'NEW', 'STRONGER', 'WEAKER', 'ACTIVE', 'FLIPPED'
     
     -- Individual Signals (VARCHAR(100) to accommodate long signal descriptions)
+    -- 7 indicators tracked: BB, MACD, RSI, SMA, Stochastic, Fibonacci, Chart Patterns
     macd_signal VARCHAR(100),
     rsi_signal VARCHAR(100),
     bb_signal VARCHAR(100),
     sma_signal VARCHAR(100),
+    stoch_signal VARCHAR(100),
+    fib_signal VARCHAR(100),
+    pattern_signal VARCHAR(100),
     
     -- Price at Signal Time
     signal_price DECIMAL(18, 4) NOT NULL,

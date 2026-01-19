@@ -59,7 +59,10 @@ def get_latest_signals(market, signal_date):
         bb_trade_signal,
         macd_signal,
         rsi_trade_signal,
-        sma_trade_signal
+        sma_trade_signal,
+        stoch_signal,
+        fib_signal,
+        pattern_signal
     FROM vw_crossover_signals_{market.replace(' ', '_').replace(' ', '')}
     WHERE trading_date = ?
     """
@@ -83,7 +86,8 @@ def determine_signal_type(bullish_count, bearish_count):
         return None, 0
 
 def store_signal(conn, market, ticker, company_name, signal_date, signal_type, 
-                signal_strength, signal_price, macd_sig, rsi_sig, bb_sig, sma_sig):
+                signal_strength, signal_price, macd_sig, rsi_sig, bb_sig, sma_sig,
+                stoch_sig, fib_sig, pattern_sig):
     """Store signal in database"""
     
     cursor = conn.cursor()
@@ -97,13 +101,15 @@ def store_signal(conn, market, ticker, company_name, signal_date, signal_type,
     INSERT INTO signal_tracking_history 
     (market, ticker, company_name, signal_date, signal_type, signal_strength,
      signal_price, macd_signal, rsi_signal, bb_signal, sma_signal,
+     stoch_signal, fib_signal, pattern_signal,
      target_date_7d, target_date_14d, target_date_30d, signal_status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW')
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW')
     """
     
     cursor.execute(query, (
         market, ticker, company_name, str(signal_date), signal_type, signal_strength,
         float(signal_price), macd_sig, rsi_sig, bb_sig, sma_sig,
+        stoch_sig, fib_sig, pattern_sig,
         str(target_7d), str(target_14d), str(target_30d)
     ))
     
@@ -272,7 +278,10 @@ def run_daily_signal_tracking():
                     row.get('macd_signal', 'N/A'),
                     row.get('rsi_trade_signal', 'N/A'),
                     row.get('bb_trade_signal', 'N/A'),
-                    row.get('sma_trade_signal', 'N/A')
+                    row.get('sma_trade_signal', 'N/A'),
+                    row.get('stoch_signal', 'N/A'),
+                    row.get('fib_signal', 'N/A'),
+                    row.get('pattern_signal', 'N/A')
                 )
                 market_signals += 1
                 total_signals += 1

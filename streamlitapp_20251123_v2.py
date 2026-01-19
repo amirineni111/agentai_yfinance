@@ -7225,13 +7225,18 @@ def show_ai_trading_signals_scanner():
     st.markdown("""
     # 🎯 Double/Triple Strategy
     
-    ### Multi-Indicator Crossover Signal Detection
+    ### Multi-Indicator Crossover Signal Detection (7 Indicators)
     
-    Find actionable trading opportunities using AI crossover signals from:
+    Find actionable trading opportunities using AI crossover signals from **7 powerful indicators**:
+    - **Bollinger Bands**: Band touch/bounce signals
     - **MACD**: Crossover events (not just position)
     - **RSI**: Momentum shift signals
-    - **Bollinger Bands**: Band touch/bounce signals
-    - **Moving Averages**: Price crossover signals
+    - **SMA/EMA**: Moving average crossover signals
+    - **Stochastic**: Overbought/oversold crossovers
+    - **Fibonacci**: Retracement level signals
+    - **Chart Patterns**: Candlestick pattern recognition
+    
+    **Signal Strength**: Ranges from 2 to 7 based on how many indicators agree (higher = stronger signal)
     
     **Key Difference from Trend Recommendations:**
     - ✅ **AI Signals** = Based on recent crossovers (timing-focused)
@@ -7245,12 +7250,12 @@ def show_ai_trading_signals_scanner():
     📊 **Power BI Integration**: This data can be analyzed in a separate Power BI report for advanced visualizations and deeper insights.
     
     **Database Tables Used:**
-    - `signal_tracking_history` - Historical signal performance (7, 14, 30-day results)
-    - `vw_signal_performance_summary` - Aggregated win rates by market/type/strength
+    - `signal_tracking_history` - Historical signal performance (7, 14, 30-day results) with **7 indicators**: BB, MACD, RSI, SMA, Stochastic, Fibonacci, Chart Patterns
+    - `vw_signal_performance_summary` - Aggregated win rates by market/type/strength (strength 2-7)
     - `vw_pending_signal_updates` - Signals awaiting results
-    - `vw_crossover_signals_NSE_500` - Current NSE 500 signals
-    - `vw_crossover_signals_NASDAQ_100` - Current NASDAQ 100 signals
-    - `vw_crossover_signals_Forex` - Current Forex signals
+    - `vw_crossover_signals_NSE_500` - Current NSE 500 signals (all 7 indicators)
+    - `vw_crossover_signals_NASDAQ_100` - Current NASDAQ 100 signals (all 7 indicators)
+    - `vw_crossover_signals_Forex` - Current Forex signals (all 7 indicators)
     """)
     
     st.markdown("---")
