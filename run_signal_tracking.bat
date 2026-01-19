@@ -1,14 +1,14 @@
 @echo off
 REM ========================================================
-REM Daily AI Price Prediction Job - Windows Task Scheduler
+REM Daily Double/Triple Strategy Signal Tracking Job
 REM ========================================================
 REM Run this batch file daily via Windows Task Scheduler
-REM Recommended time: 6:00 PM (after market close)
+REM Recommended time: 7:00 PM (after market close and data updates)
 REM ========================================================
 
 echo.
 echo ============================================
-echo   Daily AI Price Prediction Job
+echo   Double/Triple Strategy Signal Tracking
 echo   Started: %date% %time%
 echo ============================================
 echo.
@@ -16,54 +16,47 @@ echo.
 REM Change to the script directory
 cd /d "%~dp0"
 
-REM Activate Python environment if needed (uncomment if using venv)
-REM call venv\Scripts\activate.bat
-
 REM Create logs directory if it doesn't exist
 if not exist "logs" mkdir logs
 
 REM Set log file with timestamp
-set LOGFILE=logs\prediction_%date:~-4,4%%date:~-10,2%%date:~-7,2%_%time:~0,2%%time:~3,2%%time:~6,2%.log
+set LOGFILE=logs\signal_tracking_%date:~-4,4%%date:~-10,2%%date:~-7,2%_%time:~0,2%%time:~3,2%%time:~6,2%.log
 set LOGFILE=%LOGFILE: =0%
 
-REM Run the prediction job with output to log file
-echo Running prediction job...
+REM Run the signal tracking job with output to log file
+echo Running signal tracking job...
 echo Output will be saved to: %LOGFILE%
-python daily_prediction_job.py > "%LOGFILE%" 2>&1
+python daily_signal_tracking_job.py > "%LOGFILE%" 2>&1
 
 REM Check if successful
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo ============================================
-    echo   Prediction Job Completed Successfully!
+    echo   Signal Tracking Completed Successfully!
     echo   Finished: %date% %time%
     echo ============================================
     echo.
     
     REM Log success
-    echo [%date% %time%] SUCCESS: Daily prediction job completed >> prediction_job.log
+    echo [%date% %time%] SUCCESS: Daily signal tracking job completed >> signal_tracking.log
     echo.
     echo Log file saved: %LOGFILE%
-    echo Check prediction_job.log for history
+    echo Check signal_tracking.log for history
 ) else (
     echo.
     echo ============================================
-    echo   ERROR: Prediction Job Failed!
+    echo   ERROR: Signal Tracking Job Failed!
     echo   Error Code: %ERRORLEVEL%
     echo   Finished: %date% %time%
     echo ============================================
     echo.
     
     REM Log error
-    echo [%date% %time%] ERROR: Daily prediction job failed with code %ERRORLEVEL% >> prediction_job.log
+    echo [%date% %time%] ERROR: Daily signal tracking job failed with code %ERRORLEVEL% >> signal_tracking.log
     echo.
     echo Error details in: %LOGFILE%
-    echo Check prediction_job.log for history
+    echo Check signal_tracking.log for history
 )
 
-REM Comment out pause to auto-close window when scheduled
-REM echo.
-REM echo Press any key to close this window...
-REM pause > nul
-
+REM Auto-close when done (for scheduled tasks)
 exit /b %ERRORLEVEL%

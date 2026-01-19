@@ -7240,6 +7240,21 @@ def show_ai_trading_signals_scanner():
     ---
     """)
     
+    # Power BI note
+    st.info("""
+    📊 **Power BI Integration**: This data can be analyzed in a separate Power BI report for advanced visualizations and deeper insights.
+    
+    **Database Tables Used:**
+    - `signal_tracking_history` - Historical signal performance (7, 14, 30-day results)
+    - `vw_signal_performance_summary` - Aggregated win rates by market/type/strength
+    - `vw_pending_signal_updates` - Signals awaiting results
+    - `vw_crossover_signals_NSE_500` - Current NSE 500 signals
+    - `vw_crossover_signals_NASDAQ_100` - Current NASDAQ 100 signals
+    - `vw_crossover_signals_Forex` - Current Forex signals
+    """)
+    
+    st.markdown("---")
+    
     # Get the latest available MACD date
     latest_macd_date = get_latest_macd_date()
     if latest_macd_date:
@@ -9566,6 +9581,20 @@ def show_backtesting_analytics_dashboard():
     
     ### Interactive dashboard to analyze prediction accuracy across models, markets, and timeframes
     """)
+    
+    # Power BI note
+    st.info("""
+    📊 **Power BI Integration**: This data can be analyzed in a separate Power BI report for advanced visualizations and deeper insights.
+    
+    **Database Tables Used:**
+    - `ai_prediction_history` - All AI predictions with actual results
+    - `prediction_watchlist` - Active stocks for prediction (338 tickers)
+    - `vw_model_performance_summary` - Model accuracy aggregations (if available)
+    
+    Connect Power BI to SQL Server: `localhost\\MSSQLSERVER01` | Database: `stockdata_db`
+    """)
+    
+    st.markdown("---")
     
     try:
         conn = get_connection()

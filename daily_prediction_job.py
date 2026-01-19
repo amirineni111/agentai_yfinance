@@ -599,14 +599,18 @@ def update_actual_prices(conn):
         result = cursor.fetchone()
         
         if result:
-            actual_price = result[0]
+            actual_price = float(result[0])  # Convert to float
             
             # Get the original price to calculate actual change
             original_query = """
             SELECT current_price FROM ai_prediction_history WHERE prediction_id = ?
             """
             cursor.execute(original_query, (pred_id,))
-            current_price = cursor.fetchone()[0]
+            current_price = float(cursor.fetchone()[0])  # Convert to float
+            
+            # Convert predicted values to float as well
+            predicted_price = float(predicted_price)
+            predicted_change_pct = float(predicted_change_pct)
             
             actual_change_pct = ((actual_price - current_price) / current_price) * 100
             absolute_error = abs(predicted_price - actual_price)
