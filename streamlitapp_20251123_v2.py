@@ -9605,33 +9605,56 @@ def show_fundamental_analysis_page():
     
     st.markdown("---")
     
-    # Filters in sidebar
-    with st.sidebar:
-        st.markdown("### 📊 Screening Filters")
+    # Filters section
+    with st.expander("🔍 Filters & Settings", expanded=True):
+        col1, col2, col3, col4 = st.columns(4)
         
-        min_market_cap = st.number_input(
-            "Min Market Cap (Cr)", 
-            min_value=0, 
-            value=100, 
-            step=100,
-            help="Minimum market capitalization in Crores"
-        )
+        with col1:
+            # Market filter
+            market_filter = st.selectbox(
+                "Market",
+                ["All Markets", "NSE 500", "NASDAQ 100"],
+                index=0,
+                help="Filter stocks by market"
+            )
         
-        top_n = st.slider(
-            "Top N Stocks per Category",
-            min_value=5,
-            max_value=50,
-            value=10,
-            step=5,
-            help="Number of stocks to show in each category"
-        )
+        with col2:
+            # Ticker/Symbol search
+            ticker_search = st.text_input(
+                "Search Ticker/Symbol",
+                value="",
+                placeholder="e.g., RELIANCE.NS, AAPL",
+                help="Enter ticker symbol to search (partial match supported)"
+            ).strip().upper()
+        
+        with col3:
+            min_market_cap = st.number_input(
+                "Min Market Cap (Cr)", 
+                min_value=0, 
+                value=100, 
+                step=100,
+                help="Minimum market capitalization in Crores"
+            )
+        
+        with col4:
+            top_n = st.slider(
+                "Top N Stocks per Category",
+                min_value=5,
+                max_value=50,
+                value=10,
+                step=5,
+                help="Number of stocks to show in each category"
+            )
         
         st.markdown("---")
-        st.markdown("### 🎯 Quick Filters")
         
-        show_only_high_quality = st.checkbox("Only High Quality (Score ≥ 70)", value=False)
-        show_only_undervalued = st.checkbox("Only Undervalued (Score ≥ 60)", value=False)
-        show_only_high_growth = st.checkbox("Only High Growth (Score ≥ 50)", value=False)
+        col5, col6, col7 = st.columns(3)
+        with col5:
+            show_only_high_quality = st.checkbox("Only High Quality (Score ≥ 70)", value=False)
+        with col6:
+            show_only_undervalued = st.checkbox("Only Undervalued (Score ≥ 60)", value=False)
+        with col7:
+            show_only_high_growth = st.checkbox("Only High Growth (Score ≥ 50)", value=False)
     
     # Tabs for different strategies
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
@@ -9645,6 +9668,25 @@ def show_fundamental_analysis_page():
     
     try:
         conn = get_connection()
+        
+        # Build common WHERE clause filters
+        def build_filters():
+            filters = []
+            filters.append(f"market_cap >= {min_market_cap * 10000000}")
+            
+            # Market filter
+            if market_filter == "NSE 500":
+                filters.append("ticker LIKE '%.NS'")
+            elif market_filter == "NASDAQ 100":
+                filters.append("ticker NOT LIKE '%.NS'")
+            
+            # Ticker search
+            if ticker_search:
+                filters.append(f"ticker LIKE '%{ticker_search}%'")
+            
+            return " AND ".join(filters)
+        
+        base_filter = build_filters()
         
         # TAB 1: MASTER SCORING (Combined All Strategies)
         with tab1:
@@ -9674,7 +9716,7 @@ def show_fundamental_analysis_page():
                 dividend_yield * 100 as div_yield_pct,
                 market_cap / 10000000 as market_cap_cr
             FROM vw_fundamental_scoring
-            WHERE market_cap >= {min_market_cap * 10000000}
+            WHERE {base_filter}
             {'AND quality_score >= 70' if show_only_high_quality else ''}
             {'AND value_score >= 60' if show_only_undervalued else ''}
             {'AND growth_score >= 50' if show_only_high_growth else ''}
@@ -9762,7 +9804,7 @@ def show_fundamental_analysis_page():
                 debt_to_equity,
                 market_cap / 10000000 as market_cap_cr
             FROM vw_value_stocks_screen
-            WHERE market_cap >= {min_market_cap * 10000000}
+            WHERE {base_filter}
             ORDER BY value_score DESC
             """
             
@@ -9832,7 +9874,7 @@ def show_fundamental_analysis_page():
                 free_cashflow / 10000000 as fcf_cr,
                 market_cap / 10000000 as market_cap_cr
             FROM vw_quality_stocks_screen
-            WHERE market_cap >= {min_market_cap * 10000000}
+            WHERE {base_filter}
             ORDER BY quality_score DESC
             """
             
@@ -9902,7 +9944,7 @@ def show_fundamental_analysis_page():
                 total_revenue / 10000000 as revenue_cr,
                 market_cap / 10000000 as market_cap_cr
             FROM vw_growth_stocks_screen
-            WHERE market_cap >= {min_market_cap * 10000000}
+            WHERE {base_filter}
             ORDER BY growth_score DESC
             """
             
@@ -9972,7 +10014,7 @@ def show_fundamental_analysis_page():
                 return_on_equity * 100 as roe_pct,
                 market_cap / 10000000 as market_cap_cr
             FROM vw_dividend_stocks_screen
-            WHERE market_cap >= {min_market_cap * 10000000}
+            WHERE {base_filter}
             ORDER BY dividend_score DESC
             """
             
@@ -10046,7 +10088,7 @@ def show_fundamental_analysis_page():
                 last_signal_date,
                 market_cap / 10000000 as market_cap_cr
             FROM vw_momentum_value_combo
-            WHERE market_cap >= {min_market_cap * 10000000}
+            WHERE {base_filter}
             ORDER BY garp_score DESC
             """
             
