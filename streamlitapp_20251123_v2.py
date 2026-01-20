@@ -3322,7 +3322,7 @@ st.sidebar.header("📊 Dashboard Controls")
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "� Backtesting Analytics", "�🛩️ Flight Status Dashboard", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🎯 Double/Triple Strategy", "📊 Master Data Editor", "💼 My Portfolio Tracker", "� Stock Notes & Journal", "�👨‍👩‍👧‍👦 For Family"],
+    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "� Backtesting Analytics", "�🛩️ Flight Status Dashboard", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🎯 Double/Triple Strategy", "💰 Fundamental Analysis", "📊 Master Data Editor", "💼 My Portfolio Tracker", "� Stock Notes & Journal", "�👨‍👩‍👧‍👦 For Family"],
     index=0,
     key="main_page_selector"
 )
@@ -9577,6 +9577,532 @@ def show_family_assets_page():
         st.info("Please check your database connection.")
 
 
+def show_fundamental_analysis_page():
+    """
+    Fundamental Analysis Screening Dashboard with 6 value investing strategies
+    """
+    st.markdown("""
+    # 📊 Fundamental Analysis & Stock Screening
+    
+    ### Comprehensive value investing toolkit with 6 proven strategies
+    """)
+    
+    # Power BI note
+    st.info("""
+    📊 **Power BI Integration**: All fundamental screening data available for Power BI analysis.
+    
+    **Database Tables & Views:**
+    - `nse_500_fundamentals` / `nasdaq_100_fundamentals` - Weekly fundamental data (P/E, P/B, ROE, margins, etc.)
+    - `vw_value_stocks_screen` - Value investing metrics (Graham/Buffett style)
+    - `vw_quality_stocks_screen` - Quality & financial health
+    - `vw_growth_stocks_screen` - Growth momentum
+    - `vw_dividend_stocks_screen` - Dividend sustainability
+    - `vw_momentum_value_combo` - GARP strategy (Growth At Reasonable Price)
+    - `vw_fundamental_scoring` - Master ranking (0-400 points)
+    
+    Connect Power BI to: `localhost\\MSSQLSERVER01` | Database: `stockdata_db`
+    """)
+    
+    st.markdown("---")
+    
+    # Filters in sidebar
+    with st.sidebar:
+        st.markdown("### 📊 Screening Filters")
+        
+        min_market_cap = st.number_input(
+            "Min Market Cap (Cr)", 
+            min_value=0, 
+            value=100, 
+            step=100,
+            help="Minimum market capitalization in Crores"
+        )
+        
+        top_n = st.slider(
+            "Top N Stocks per Category",
+            min_value=5,
+            max_value=50,
+            value=10,
+            step=5,
+            help="Number of stocks to show in each category"
+        )
+        
+        st.markdown("---")
+        st.markdown("### 🎯 Quick Filters")
+        
+        show_only_high_quality = st.checkbox("Only High Quality (Score ≥ 70)", value=False)
+        show_only_undervalued = st.checkbox("Only Undervalued (Score ≥ 60)", value=False)
+        show_only_high_growth = st.checkbox("Only High Growth (Score ≥ 50)", value=False)
+    
+    # Tabs for different strategies
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "🏆 Master Scoring",
+        "💎 Value Stocks", 
+        "⭐ Quality Stocks",
+        "🚀 Growth Stocks",
+        "💰 Dividend Stocks",
+        "🎯 GARP Strategy"
+    ])
+    
+    try:
+        conn = get_connection()
+        
+        # TAB 1: MASTER SCORING (Combined All Strategies)
+        with tab1:
+            st.markdown("### 🏆 Comprehensive Fundamental Ranking")
+            st.markdown("""
+            **Combined Score (0-400 points):**
+            - Value Score (0-100): P/E, P/B, P/S, PEG, ROE
+            - Quality Score (0-100): ROE, margins, debt ratios, cash flow
+            - Growth Score (0-100): Revenue & earnings growth
+            - Dividend Score (0-100): Yield, payout ratio, sustainability
+            """)
+            
+            query = f"""
+            SELECT TOP {top_n}
+                ticker,
+                company_name,
+                total_score,
+                overall_rating,
+                value_score,
+                quality_score,
+                growth_score,
+                dividend_score,
+                trailing_pe,
+                price_to_book,
+                return_on_equity * 100 as roe_pct,
+                revenue_growth * 100 as growth_pct,
+                dividend_yield * 100 as div_yield_pct,
+                market_cap / 10000000 as market_cap_cr
+            FROM vw_fundamental_scoring
+            WHERE market_cap >= {min_market_cap * 10000000}
+            {'AND quality_score >= 70' if show_only_high_quality else ''}
+            {'AND value_score >= 60' if show_only_undervalued else ''}
+            {'AND growth_score >= 50' if show_only_high_growth else ''}
+            ORDER BY total_score DESC
+            """
+            
+            df = pd.read_sql(query, conn)
+            
+            if not df.empty:
+                # Metrics row
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Top Stock", df.iloc[0]['ticker'], f"Score: {df.iloc[0]['total_score']}")
+                with col2:
+                    avg_score = df['total_score'].mean()
+                    st.metric("Avg Score", f"{avg_score:.0f}/400")
+                with col3:
+                    a_plus = len(df[df['total_score'] >= 300])
+                    st.metric("A+ Stocks", a_plus)
+                with col4:
+                    avg_roe = df['roe_pct'].mean()
+                    st.metric("Avg ROE", f"{avg_roe:.1f}%")
+                
+                # Main table
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    column_config={
+                        "ticker": "Ticker",
+                        "company_name": "Company",
+                        "total_score": st.column_config.ProgressColumn(
+                            "Total Score",
+                            format="%d/400",
+                            min_value=0,
+                            max_value=400
+                        ),
+                        "overall_rating": "Rating",
+                        "value_score": st.column_config.ProgressColumn("Value", format="%d", min_value=0, max_value=100),
+                        "quality_score": st.column_config.ProgressColumn("Quality", format="%d", min_value=0, max_value=100),
+                        "growth_score": st.column_config.ProgressColumn("Growth", format="%d", min_value=0, max_value=100),
+                        "dividend_score": st.column_config.ProgressColumn("Dividend", format="%d", min_value=0, max_value=100),
+                        "trailing_pe": st.column_config.NumberColumn("P/E", format="%.1f"),
+                        "price_to_book": st.column_config.NumberColumn("P/B", format="%.2f"),
+                        "roe_pct": st.column_config.NumberColumn("ROE %", format="%.1f%%"),
+                        "growth_pct": st.column_config.NumberColumn("Growth %", format="%.1f%%"),
+                        "div_yield_pct": st.column_config.NumberColumn("Div Yield %", format="%.2f%%"),
+                        "market_cap_cr": st.column_config.NumberColumn("Mkt Cap (Cr)", format="₹%.0f")
+                    },
+                    hide_index=True
+                )
+                
+                # Distribution chart
+                st.markdown("#### Score Distribution")
+                fig = px.histogram(df, x='total_score', nbins=20, 
+                                  title='Total Score Distribution',
+                                  labels={'total_score': 'Total Score', 'count': 'Number of Stocks'})
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("No stocks found matching the criteria.")
+        
+        # TAB 2: VALUE STOCKS
+        with tab2:
+            st.markdown("### 💎 Value Investing (Graham & Buffett Style)")
+            st.markdown("""
+            **Classic value metrics:**
+            - P/E Ratio < 15 (undervalued)
+            - Price-to-Book < 1.5 (trading below book value)
+            - Price-to-Sales < 2 (revenue multiple)
+            - PEG Ratio < 1 (growth adjusted value)
+            - ROE > 15% (quality filter)
+            """)
+            
+            query = f"""
+            SELECT TOP {top_n}
+                ticker,
+                company_name,
+                value_score,
+                valuation_category,
+                trailing_pe,
+                forward_pe,
+                price_to_book,
+                price_to_sales,
+                peg_ratio,
+                return_on_equity * 100 as roe_pct,
+                debt_to_equity,
+                market_cap / 10000000 as market_cap_cr
+            FROM vw_value_stocks_screen
+            WHERE market_cap >= {min_market_cap * 10000000}
+            ORDER BY value_score DESC
+            """
+            
+            df = pd.read_sql(query, conn)
+            
+            if not df.empty:
+                # Metrics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    deep_value = len(df[df['valuation_category'] == 'Deep Value'])
+                    st.metric("Deep Value Stocks", deep_value)
+                with col2:
+                    avg_pe = df['trailing_pe'].mean()
+                    st.metric("Avg P/E", f"{avg_pe:.1f}")
+                with col3:
+                    avg_pb = df['price_to_book'].mean()
+                    st.metric("Avg P/B", f"{avg_pb:.2f}")
+                with col4:
+                    avg_roe = df['roe_pct'].mean()
+                    st.metric("Avg ROE", f"{avg_roe:.1f}%")
+                
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    column_config={
+                        "ticker": "Ticker",
+                        "company_name": "Company",
+                        "value_score": st.column_config.ProgressColumn("Value Score", format="%d/100", min_value=0, max_value=100),
+                        "valuation_category": "Category",
+                        "trailing_pe": st.column_config.NumberColumn("P/E", format="%.1f"),
+                        "forward_pe": st.column_config.NumberColumn("Fwd P/E", format="%.1f"),
+                        "price_to_book": st.column_config.NumberColumn("P/B", format="%.2f"),
+                        "price_to_sales": st.column_config.NumberColumn("P/S", format="%.2f"),
+                        "peg_ratio": st.column_config.NumberColumn("PEG", format="%.2f"),
+                        "roe_pct": st.column_config.NumberColumn("ROE %", format="%.1f%%"),
+                        "debt_to_equity": st.column_config.NumberColumn("Debt/Equity", format="%.2f"),
+                        "market_cap_cr": st.column_config.NumberColumn("Mkt Cap (Cr)", format="₹%.0f")
+                    },
+                    hide_index=True
+                )
+            else:
+                st.warning("No value stocks found.")
+        
+        # TAB 3: QUALITY STOCKS
+        with tab3:
+            st.markdown("### ⭐ High Quality Businesses")
+            st.markdown("""
+            **Profitability & financial strength:**
+            - ROE > 20% (excellent returns)
+            - Profit Margin > 15% (pricing power)
+            - Debt-to-Equity < 0.5 (strong balance sheet)
+            - Positive Free Cash Flow (cash generation)
+            """)
+            
+            query = f"""
+            SELECT TOP {top_n}
+                ticker,
+                company_name,
+                quality_score,
+                quality_category,
+                return_on_equity * 100 as roe_pct,
+                return_on_assets * 100 as roa_pct,
+                profit_margin * 100 as profit_margin_pct,
+                operating_margin * 100 as operating_margin_pct,
+                debt_to_equity,
+                current_ratio,
+                free_cashflow / 10000000 as fcf_cr,
+                market_cap / 10000000 as market_cap_cr
+            FROM vw_quality_stocks_screen
+            WHERE market_cap >= {min_market_cap * 10000000}
+            ORDER BY quality_score DESC
+            """
+            
+            df = pd.read_sql(query, conn)
+            
+            if not df.empty:
+                # Metrics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    excellent = len(df[df['quality_category'] == 'Excellent'])
+                    st.metric("Excellent Quality", excellent)
+                with col2:
+                    avg_roe = df['roe_pct'].mean()
+                    st.metric("Avg ROE", f"{avg_roe:.1f}%")
+                with col3:
+                    avg_margin = df['profit_margin_pct'].mean()
+                    st.metric("Avg Margin", f"{avg_margin:.1f}%")
+                with col4:
+                    low_debt = len(df[df['debt_to_equity'] < 0.5])
+                    st.metric("Low Debt Stocks", low_debt)
+                
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    column_config={
+                        "ticker": "Ticker",
+                        "company_name": "Company",
+                        "quality_score": st.column_config.ProgressColumn("Quality Score", format="%d/100", min_value=0, max_value=100),
+                        "quality_category": "Category",
+                        "roe_pct": st.column_config.NumberColumn("ROE %", format="%.1f%%"),
+                        "roa_pct": st.column_config.NumberColumn("ROA %", format="%.1f%%"),
+                        "profit_margin_pct": st.column_config.NumberColumn("Profit Margin %", format="%.1f%%"),
+                        "operating_margin_pct": st.column_config.NumberColumn("Op Margin %", format="%.1f%%"),
+                        "debt_to_equity": st.column_config.NumberColumn("Debt/Equity", format="%.2f"),
+                        "current_ratio": st.column_config.NumberColumn("Current Ratio", format="%.2f"),
+                        "fcf_cr": st.column_config.NumberColumn("FCF (Cr)", format="₹%.0f"),
+                        "market_cap_cr": st.column_config.NumberColumn("Mkt Cap (Cr)", format="₹%.0f")
+                    },
+                    hide_index=True
+                )
+            else:
+                st.warning("No quality stocks found.")
+        
+        # TAB 4: GROWTH STOCKS
+        with tab4:
+            st.markdown("### 🚀 High Growth Companies")
+            st.markdown("""
+            **Revenue & earnings momentum:**
+            - Revenue Growth > 15% YoY
+            - Earnings Growth > 15% YoY
+            - PEG Ratio < 1.5 (growth at reasonable price)
+            - ROE > 15% (profitable growth)
+            """)
+            
+            query = f"""
+            SELECT TOP {top_n}
+                ticker,
+                company_name,
+                growth_score,
+                growth_category,
+                revenue_growth * 100 as revenue_growth_pct,
+                earnings_growth * 100 as earnings_growth_pct,
+                forward_pe,
+                peg_ratio,
+                profit_margin * 100 as profit_margin_pct,
+                return_on_equity * 100 as roe_pct,
+                total_revenue / 10000000 as revenue_cr,
+                market_cap / 10000000 as market_cap_cr
+            FROM vw_growth_stocks_screen
+            WHERE market_cap >= {min_market_cap * 10000000}
+            ORDER BY growth_score DESC
+            """
+            
+            df = pd.read_sql(query, conn)
+            
+            if not df.empty:
+                # Metrics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    high_growth = len(df[df['growth_category'] == 'High Growth'])
+                    st.metric("High Growth Stocks", high_growth)
+                with col2:
+                    avg_rev_growth = df['revenue_growth_pct'].mean()
+                    st.metric("Avg Rev Growth", f"{avg_rev_growth:.1f}%")
+                with col3:
+                    avg_earn_growth = df['earnings_growth_pct'].mean()
+                    st.metric("Avg Earn Growth", f"{avg_earn_growth:.1f}%")
+                with col4:
+                    avg_peg = df['peg_ratio'].mean()
+                    st.metric("Avg PEG", f"{avg_peg:.2f}")
+                
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    column_config={
+                        "ticker": "Ticker",
+                        "company_name": "Company",
+                        "growth_score": st.column_config.ProgressColumn("Growth Score", format="%d/100", min_value=0, max_value=100),
+                        "growth_category": "Category",
+                        "revenue_growth_pct": st.column_config.NumberColumn("Rev Growth %", format="%.1f%%"),
+                        "earnings_growth_pct": st.column_config.NumberColumn("Earn Growth %", format="%.1f%%"),
+                        "forward_pe": st.column_config.NumberColumn("Fwd P/E", format="%.1f"),
+                        "peg_ratio": st.column_config.NumberColumn("PEG", format="%.2f"),
+                        "profit_margin_pct": st.column_config.NumberColumn("Margin %", format="%.1f%%"),
+                        "roe_pct": st.column_config.NumberColumn("ROE %", format="%.1f%%"),
+                        "revenue_cr": st.column_config.NumberColumn("Revenue (Cr)", format="₹%.0f"),
+                        "market_cap_cr": st.column_config.NumberColumn("Mkt Cap (Cr)", format="₹%.0f")
+                    },
+                    hide_index=True
+                )
+            else:
+                st.warning("No growth stocks found.")
+        
+        # TAB 5: DIVIDEND STOCKS
+        with tab5:
+            st.markdown("### 💰 Dividend Income Stocks")
+            st.markdown("""
+            **Sustainable dividend yield:**
+            - Dividend Yield > 3%
+            - Payout Ratio < 75% (sustainable)
+            - Positive Free Cash Flow
+            - Low Debt (Debt/Equity < 1.5)
+            """)
+            
+            query = f"""
+            SELECT TOP {top_n}
+                ticker,
+                company_name,
+                dividend_score,
+                dividend_category,
+                dividend_yield * 100 as dividend_yield_pct,
+                dividend_rate,
+                payout_ratio * 100 as payout_ratio_pct,
+                free_cashflow / 10000000 as fcf_cr,
+                profit_margin * 100 as profit_margin_pct,
+                debt_to_equity,
+                return_on_equity * 100 as roe_pct,
+                market_cap / 10000000 as market_cap_cr
+            FROM vw_dividend_stocks_screen
+            WHERE market_cap >= {min_market_cap * 10000000}
+            ORDER BY dividend_score DESC
+            """
+            
+            df = pd.read_sql(query, conn)
+            
+            if not df.empty:
+                # Metrics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    excellent_div = len(df[df['dividend_category'] == 'Excellent Dividend'])
+                    st.metric("Excellent Dividend", excellent_div)
+                with col2:
+                    avg_yield = df['dividend_yield_pct'].mean()
+                    st.metric("Avg Yield", f"{avg_yield:.2f}%")
+                with col3:
+                    avg_payout = df['payout_ratio_pct'].mean()
+                    st.metric("Avg Payout", f"{avg_payout:.1f}%")
+                with col4:
+                    sustainable = len(df[df['payout_ratio_pct'] < 75])
+                    st.metric("Sustainable (<75%)", sustainable)
+                
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    column_config={
+                        "ticker": "Ticker",
+                        "company_name": "Company",
+                        "dividend_score": st.column_config.ProgressColumn("Dividend Score", format="%d/100", min_value=0, max_value=100),
+                        "dividend_category": "Category",
+                        "dividend_yield_pct": st.column_config.NumberColumn("Div Yield %", format="%.2f%%"),
+                        "dividend_rate": st.column_config.NumberColumn("Div Rate", format="₹%.2f"),
+                        "payout_ratio_pct": st.column_config.NumberColumn("Payout %", format="%.1f%%"),
+                        "fcf_cr": st.column_config.NumberColumn("FCF (Cr)", format="₹%.0f"),
+                        "profit_margin_pct": st.column_config.NumberColumn("Margin %", format="%.1f%%"),
+                        "debt_to_equity": st.column_config.NumberColumn("Debt/Equity", format="%.2f"),
+                        "roe_pct": st.column_config.NumberColumn("ROE %", format="%.1f%%"),
+                        "market_cap_cr": st.column_config.NumberColumn("Mkt Cap (Cr)", format="₹%.0f")
+                    },
+                    hide_index=True
+                )
+            else:
+                st.warning("No dividend stocks found.")
+        
+        # TAB 6: GARP STRATEGY
+        with tab6:
+            st.markdown("### 🎯 GARP: Growth At Reasonable Price")
+            st.markdown("""
+            **Combined strategy with technical signals:**
+            - Value (40 pts): P/E < 20, P/B < 2, PEG < 1.5
+            - Growth (30 pts): Revenue & earnings growth > 10%
+            - Quality (20 pts): ROE > 15%, Debt/Equity < 1
+            - Momentum (10 pts): Recent technical buy signals (from signal tracking)
+            """)
+            
+            query = f"""
+            SELECT TOP {top_n}
+                ticker,
+                company_name,
+                garp_score,
+                investment_signal,
+                trailing_pe,
+                price_to_book,
+                peg_ratio,
+                return_on_equity * 100 as roe_pct,
+                revenue_growth * 100 as revenue_growth_pct,
+                earnings_growth * 100 as earnings_growth_pct,
+                debt_to_equity,
+                bullish_strength,
+                bearish_strength,
+                trend,
+                last_signal_date,
+                market_cap / 10000000 as market_cap_cr
+            FROM vw_momentum_value_combo
+            WHERE market_cap >= {min_market_cap * 10000000}
+            ORDER BY garp_score DESC
+            """
+            
+            df = pd.read_sql(query, conn)
+            
+            if not df.empty:
+                # Metrics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    buy_signals = len(df[df['investment_signal'].str.contains('BUY', na=False)])
+                    st.metric("BUY Signals", buy_signals)
+                with col2:
+                    avg_garp = df['garp_score'].mean()
+                    st.metric("Avg GARP Score", f"{avg_garp:.0f}/100")
+                with col3:
+                    uptrends = len(df[df['trend'] == 'Uptrend'])
+                    st.metric("In Uptrend", uptrends)
+                with col4:
+                    strong_bullish = len(df[df['bullish_strength'] >= 4])
+                    st.metric("Strong Signals (4+)", strong_bullish)
+                
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    column_config={
+                        "ticker": "Ticker",
+                        "company_name": "Company",
+                        "garp_score": st.column_config.ProgressColumn("GARP Score", format="%d/100", min_value=0, max_value=100),
+                        "investment_signal": "Signal",
+                        "trailing_pe": st.column_config.NumberColumn("P/E", format="%.1f"),
+                        "price_to_book": st.column_config.NumberColumn("P/B", format="%.2f"),
+                        "peg_ratio": st.column_config.NumberColumn("PEG", format="%.2f"),
+                        "roe_pct": st.column_config.NumberColumn("ROE %", format="%.1f%%"),
+                        "revenue_growth_pct": st.column_config.NumberColumn("Rev Growth %", format="%.1f%%"),
+                        "earnings_growth_pct": st.column_config.NumberColumn("Earn Growth %", format="%.1f%%"),
+                        "debt_to_equity": st.column_config.NumberColumn("Debt/Equity", format="%.2f"),
+                        "bullish_strength": "Bull Strength",
+                        "bearish_strength": "Bear Strength",
+                        "trend": "Trend",
+                        "last_signal_date": "Last Signal",
+                        "market_cap_cr": st.column_config.NumberColumn("Mkt Cap (Cr)", format="₹%.0f")
+                    },
+                    hide_index=True
+                )
+            else:
+                st.warning("No GARP stocks found.")
+        
+        conn.close()
+        
+    except Exception as e:
+        st.error(f"❌ Error loading fundamental analysis: {e}")
+        st.info("Please ensure fundamental data tables and views are created.")
+        import traceback
+        st.code(traceback.format_exc())
+
+
 def show_backtesting_analytics_dashboard():
     """
     Comprehensive Backtesting Analytics Dashboard with Power BI-style filters and visualizations
@@ -10128,4 +10654,5 @@ elif page == "�👨‍👩‍👧‍👦 For Family":
     show_family_assets_page()
 elif page == "🎯 Double/Triple Strategy":
     show_ai_trading_signals_scanner()
-
+elif page == "💰 Fundamental Analysis":
+    show_fundamental_analysis_page()
