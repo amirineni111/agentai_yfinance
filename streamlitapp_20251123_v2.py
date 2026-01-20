@@ -9656,6 +9656,210 @@ def show_fundamental_analysis_page():
         with col7:
             show_only_high_growth = st.checkbox("Only High Growth (Score ≥ 50)", value=False)
     
+    st.markdown("---")
+    
+    # Price Information Boxes (when single ticker selected)
+    if ticker_search:
+        try:
+            conn = get_connection()
+            
+            # Try to find ticker in both NSE and NASDAQ historical tables
+            hist_df = None
+            table_name = None
+            
+            # Try NSE first
+            try:
+                nse_query = f"""
+                SELECT TOP 1
+                    ticker,
+                    close_price as current_price,
+                    trading_date
+                FROM nse_500_hist_data
+                WHERE ticker LIKE '%{ticker_search}%'
+                ORDER BY trading_date DESC
+                """
+                nse_df = pd.read_sql(nse_query, conn)
+                if not nse_df.empty:
+                    hist_df = nse_df
+                    table_name = 'nse_500_hist_data'
+            except:
+                pass
+            
+            # If not found in NSE, try NASDAQ
+            if hist_df is None or hist_df.empty:
+                try:
+                    nasdaq_query = f"""
+                    SELECT TOP 1
+                        ticker,
+                        close_price as current_price,
+                        trading_date
+                    FROM nasdaq_100_hist_data
+                    WHERE ticker LIKE '%{ticker_search}%'
+                    ORDER BY trading_date DESC
+                    """
+                    nasdaq_df = pd.read_sql(nasdaq_query, conn)
+                    if not nasdaq_df.empty:
+                        hist_df = nasdaq_df
+                        table_name = 'nasdaq_100_hist_data'
+                except:
+                    pass
+            
+            if hist_df is not None and len(hist_df) == 1:
+                # Single ticker found
+                row = hist_df.iloc[0]
+                ticker_name = row['ticker']
+                current_price = float(row['current_price']) if row['current_price'] is not None else None
+                last_date = row['trading_date']
+                
+                # Get all metrics in one query
+                metrics_query = f"""
+                SELECT 
+                    MAX(CASE WHEN trading_date >= DATEADD(WEEK, -52, GETDATE()) THEN CAST(high_price AS FLOAT) END) as fifty_two_week_high,
+                    MIN(CASE WHEN trading_date >= DATEADD(WEEK, -52, GETDATE()) THEN CAST(low_price AS FLOAT) END) as fifty_two_week_low,
+                    MAX(CAST(high_price AS FLOAT)) as all_time_high,
+                    MIN(CAST(low_price AS FLOAT)) as all_time_low,
+                    MIN(trading_date) as data_start_date,
+                    MAX(trading_date) as data_end_date,
+                    COUNT(*) as total_days
+                FROM {table_name}
+                WHERE ticker = '{ticker_name}'
+                """
+                metrics_df = pd.read_sql(metrics_query, conn)
+                
+                week_52_high = float(metrics_df.iloc[0]['fifty_two_week_high']) if metrics_df.iloc[0]['fifty_two_week_high'] is not None else None
+                week_52_low = float(metrics_df.iloc[0]['fifty_two_week_low']) if metrics_df.iloc[0]['fifty_two_week_low'] is not None else None
+                all_time_high = float(metrics_df.iloc[0]['all_time_high']) if metrics_df.iloc[0]['all_time_high'] is not None else None
+                all_time_low = float(metrics_df.iloc[0]['all_time_low']) if metrics_df.iloc[0]['all_time_low'] is not None else None
+                data_start = metrics_df.iloc[0]['data_start_date']
+                data_end = metrics_df.iloc[0]['data_end_date']
+                total_days = metrics_df.iloc[0]['total_days']
+                
+                st.markdown(f"### 📊 Price Overview: {ticker_name}")
+                st.caption(f"📅 Data range: {data_start} to {data_end} ({total_days} days)")
+                
+                col1, col2, col3, col4, col5 = st.columns(5)
+                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4, col5 = st.columns(5)
+                
+                with col1:
+                    st.metric(
+                        "Current Price",
+                        f"₹{current_price:.2f}" if current_price else "N/A"
+                    )
+                
+                with col2:
+                    pct_from_52w_high = ((current_price - week_52_high) / week_52_high * 100) if week_52_high and current_price else None
+                    st.metric(
+                        "52 Week High",
+                        f"₹{week_52_high:.2f}" if week_52_high else "N/A",
+                        delta=f"{pct_from_52w_high:.1f}%" if pct_from_52w_high else None,
+                        delta_color="inverse"
+                    )
+                
+                with col3:
+                    pct_from_52w_low = ((current_price - week_52_low) / week_52_low * 100) if week_52_low and current_price else None
+                    st.metric(
+                        "52 Week Low",
+                        f"₹{week_52_low:.2f}" if week_52_low else "N/A",
+                        delta=f"{pct_from_52w_low:.1f}%" if pct_from_52w_low else None,
+                        delta_color="normal"
+                    )
+                
+                with col4:
+                    pct_from_ath = ((current_price - all_time_high) / all_time_high * 100) if all_time_high and current_price else None
+                    st.metric(
+                        "All Time High",
+                        f"₹{all_time_high:.2f}" if all_time_high else "N/A",
+                        delta=f"{pct_from_ath:.1f}%" if pct_from_ath else None,
+                        delta_color="inverse"
+                    )
+                
+                with col5:
+                    pct_from_atl = ((current_price - all_time_low) / all_time_low * 100) if all_time_low and current_price else None
+                    st.metric(
+                        "All Time Low",
+                        f"₹{all_time_low:.2f}" if all_time_low else "N/A",
+                        delta=f"{pct_from_atl:.1f}%" if pct_from_atl else None,
+                        delta_color="normal"
+                    )
+                
+                st.markdown("---")
+            elif hist_df is not None and len(hist_df) > 1:
+                # Multiple tickers found
+                st.markdown("### 📊 Price Overview")
+                col1, col2, col3, col4, col5 = st.columns(5)
+                
+                with col1:
+                    st.metric("Current Price", "N/A")
+                with col2:
+                    st.metric("52 Week High", "N/A")
+                with col3:
+                    st.metric("52 Week Low", "N/A")
+                with col4:
+                    st.metric("All Time High", "N/A")
+                with col5:
+                    st.metric("All Time Low", "N/A")
+                
+                st.warning(f"⚠️ Multiple tickers found matching '{ticker_search}'. Please be more specific.")
+                st.markdown("---")
+            else:
+                # No data found
+                st.markdown("### 📊 Price Overview")
+                col1, col2, col3, col4, col5 = st.columns(5)
+                
+                with col1:
+                    st.metric("Current Price", "N/A")
+                with col2:
+                    st.metric("52 Week High", "N/A")
+                with col3:
+                    st.metric("52 Week Low", "N/A")
+                with col4:
+                    st.metric("All Time High", "N/A")
+                with col5:
+                    st.metric("All Time Low", "N/A")
+                
+                st.warning(f"⚠️ No historical data found for '{ticker_search}'")
+                st.markdown("---")
+            
+            conn.close()
+        
+        except Exception as e:
+            # If error fetching price data, show N/A with error message
+            st.markdown("### 📊 Price Overview")
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            with col1:
+                st.metric("Current Price", "N/A")
+            with col2:
+                st.metric("52 Week High", "N/A")
+            with col3:
+                st.metric("52 Week Low", "N/A")
+            with col4:
+                st.metric("All Time High", "N/A")
+            with col5:
+                st.metric("All Time Low", "N/A")
+            
+            st.error(f"❌ Error fetching price data: {str(e)}")
+            st.markdown("---")
+    else:
+        # No ticker selected - show N/A boxes
+        st.markdown("### 📊 Price Overview")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            st.metric("Current Price", "N/A")
+        with col2:
+            st.metric("52 Week High", "N/A")
+        with col3:
+            st.metric("52 Week Low", "N/A")
+        with col4:
+            st.metric("All Time High", "N/A")
+        with col5:
+            st.metric("All Time Low", "N/A")
+        
+        st.info("💡 **Tip:** Enter a ticker symbol in the search box above to see price information")
+        st.markdown("---")
+    
     # Tabs for different strategies
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "🏆 Master Scoring",
