@@ -162,10 +162,26 @@ def update_signal_results(conn):
         (signal_id, market, ticker, signal_date, signal_type, signal_price,
          target_7d, result_7d, target_14d, result_14d, target_30d, result_30d) = signal
         
-        signal_date = signal_date.date() if hasattr(signal_date, 'date') else signal_date
-        target_7d = target_7d.date() if hasattr(target_7d, 'date') else target_7d
-        target_14d = target_14d.date() if hasattr(target_14d, 'date') else target_14d
-        target_30d = target_30d.date() if hasattr(target_30d, 'date') else target_30d
+        # Convert dates properly - handle both datetime objects and strings
+        if isinstance(signal_date, str):
+            signal_date = datetime.strptime(signal_date, '%Y-%m-%d').date()
+        elif hasattr(signal_date, 'date'):
+            signal_date = signal_date.date()
+            
+        if isinstance(target_7d, str):
+            target_7d = datetime.strptime(target_7d, '%Y-%m-%d').date()
+        elif hasattr(target_7d, 'date'):
+            target_7d = target_7d.date()
+            
+        if isinstance(target_14d, str):
+            target_14d = datetime.strptime(target_14d, '%Y-%m-%d').date()
+        elif hasattr(target_14d, 'date'):
+            target_14d = target_14d.date()
+            
+        if isinstance(target_30d, str):
+            target_30d = datetime.strptime(target_30d, '%Y-%m-%d').date()
+        elif hasattr(target_30d, 'date'):
+            target_30d = target_30d.date()
         
         signal_price = float(signal_price)
         
