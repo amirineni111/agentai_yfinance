@@ -44,6 +44,34 @@ def log_message(message, level="INFO"):
     message = message.encode('ascii', 'ignore').decode('ascii')
     print(f"[{timestamp}] [{level}] {message}")
 
+def get_latest_available_date(market):
+    """Get the latest available trading date for a market"""
+    conn = get_db_connection()
+    config = MARKETS[market]
+    
+    query = f"""
+    SELECT MAX(trading_date) as latest_date
+    FROM {config['table']}
+    """
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query)
+        result = cursor.fetchone()
+        conn.close()
+        if result and result[0]:
+            # Handle both datetime and date objects
+            if hasattr(result[0], 'date'):
+                return result[0].date()
+            elif isinstance(result[0], str):
+                return datetime.strptime(result[0], '%Y-%m-%d').date()
+            return result[0]
+        return None
+    except Exception as e:
+        log_message(f"Error getting latest date for {market}: {str(e)}", "ERROR")
+        conn.close()
+        return None
+
 def get_latest_signals(market, signal_date):
     """Get Double/Triple strategy signals for a specific market and date"""
     conn = get_db_connection()
@@ -259,24 +287,44 @@ def run_daily_signal_tracking():
     log_message("=" * 80)
     
     conn = get_db_connection()
-    signal_date = datetime.now().date()
     
     # Step 1: Update past signal results
     log_message("Step 1: Updating results for past signals...")
     update_signal_results(conn)
     
-    # Step 2: Detect and store today's signals
-    log_message(f"\nStep 2: Detecting signals for {signal_date}...")
+    # Step 2: Detect and store signals for each market's latest available date
+    log_message(f"\nStep 2: Detecting signals for each market...")
     
     total_signals = 0
     
     for market in MARKETS.keys():
         log_message(f"\nProcessing {market}...")
         
+        # Get the latest available date for this market
+        signal_date = get_latest_available_date(market)
+        
+        if signal_date is None:
+            log_message(f"  No data available for {market}", "WARNING")
+            continue
+        
+        log_message(f"  Using signal date: {signal_date}")
+        
+        # Check if we already have signals for this date in the database
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM signal_tracking_history
+            WHERE market = ? AND signal_date = ?
+        """, (market, str(signal_date)))
+        existing_count = cursor.fetchone()[0]
+        
+        if existing_count > 0:
+            log_message(f"  Already have {existing_count} signals for {signal_date}, skipping...", "INFO")
+            continue
+        
         signals_df = get_latest_signals(market, signal_date)
         
         if signals_df.empty:
-            log_message(f"  No signals found for {market}", "WARNING")
+            log_message(f"  No signals found for {market} on {signal_date}", "WARNING")
             continue
         
         market_signals = 0
@@ -302,13 +350,13 @@ def run_daily_signal_tracking():
                 market_signals += 1
                 total_signals += 1
         
-        log_message(f"  Found {market_signals} signals in {market}")
+        log_message(f"  Found {market_signals} signals in {market} for {signal_date}")
     
     conn.close()
     
     log_message("=" * 80)
     log_message(f"Signal Tracking Job Completed Successfully!")
-    log_message(f"Total Signals Detected Today: {total_signals}")
+    log_message(f"Total Signals Detected: {total_signals}")
     log_message("=" * 80)
 
 if __name__ == "__main__":
