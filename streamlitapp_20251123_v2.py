@@ -3322,7 +3322,7 @@ st.sidebar.header("📊 Dashboard Controls")
 st.sidebar.markdown("### 🧭 Page Navigation")
 page = st.sidebar.radio(
     "Select Page:",
-    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "� Backtesting Analytics", "�🛩️ Flight Status Dashboard", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🎯 Double/Triple Strategy", "💰 Fundamental Analysis", "📊 Master Data Editor", "💼 My Portfolio Tracker", "� Stock Notes & Journal", "�👨‍👩‍👧‍👦 For Family"],
+    ["🏠 Home & Filters", "📋 Data in Table format", "📈 Technical Analysis", "📊 Backtesting Analytics", "🛩️ Flight Status Dashboard", "📊 Reco Tracking and Current Status", "📈 Today Trend Recommendations", "🎯 Double/Triple Strategy", "💰 Fundamental Analysis", "📊 Master Data Editor", "💼 My Portfolio Tracker", "📝 Stock Notes & Journal", "👨‍👩‍👧‍👦 For Family", "🏗️ Architecture", "⚙️ Operational Process"],
     index=0,
     key="main_page_selector"
 )
@@ -10866,6 +10866,755 @@ def show_backtesting_analytics_dashboard():
         st.code(traceback.format_exc())
 
 
+# =====================================================
+# ARCHITECTURE PAGE
+# =====================================================
+def show_architecture_page():
+    """System Architecture documentation page"""
+    st.title("System Architecture")
+    st.markdown("##### End-to-End Trading Analytics Platform")
+    st.markdown("---")
+
+    # ---- HIGH-LEVEL OVERVIEW ----
+    st.header("High-Level System Overview")
+
+    st.markdown("""
+    This platform is composed of **six independent projects** that work together through a shared **SQL Server database** 
+    (`stockdata_db`). Each project has a single responsibility and communicates with the others only through database tables and views.
+    """)
+
+    # Architecture diagram using Mermaid-style representation in a code block
+    st.markdown("#### Component Diagram")
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.markdown("""
+```
+ DATA LAYER (yfinance / Alpha Vantage / Yahoo Finance)
+    |
+    v
+ +-------------------------------------------------------------+
+ |              DATA FETCH JOBS (Separate Project)              |
+ |  Pulls daily OHLCV data for NSE 500, NASDAQ 100, Forex      |
+ |  Writes to: nse_500_hist_data, nasdaq_100_hist_data,         |
+ |             forex_hist_data                                  |
+ +-------------------------------------------------------------+
+    |
+    v
+ +-------------------------------------------------------------+
+ |              SQL SERVER DATABASE (stockdata_db)               |
+ |                                                               |
+ |  Historical Data    | ML Predictions    | Tracking & Config   |
+ |  ================== | ================= | ==================  |
+ |  nse_500_hist_data  | ml_nse_trading_   | signal_tracking_    |
+ |  nasdaq_100_hist_   |   predictions     |   history           |
+ |    data             | ml_trading_       | ai_prediction_      |
+ |  forex_hist_data    |   predictions     |   history           |
+ |  nse_500_fundament  | forex_ml_         | prediction_         |
+ |    als              |   predictions     |   watchlist         |
+ |  nasdaq_100_funda   |                   | portfolio_tracker   |
+ |    mentals          |                   | stock_notes         |
+ |                     |                   | trade_log           |
+ +-------------------------------------------------------------+
+    |                          |                      |
+    v                          v                      v
+ +------------------+  +------------------+  +------------------+
+ | STRATEGY 1       |  | STRATEGY 2       |  | SIGNAL TRACKING  |
+ | (3 ML Projects)  |  | (This Project)   |  | (This Project)   |
+ |                  |  |                  |  |                  |
+ | sqlserver_copilot|  | daily_prediction |  | daily_signal_    |
+ |   (NASDAQ)       |  |   _job.py        |  |   tracking_job   |
+ | sqlserver_copilot|  |                  |  | backfill_signal  |
+ |   _nse (NSE)     |  | Active Learning  |  |   _history.py    |
+ | sqlserver_copilot|  | Self-improving   |  |                  |
+ |   _forex (Forex) |  | Price Regression |  | 7 Indicators     |
+ +------------------+  +------------------+  +------------------+
+    |                          |                      |
+    v                          v                      v
+ +-------------------------------------------------------------+
+ |              OUTCOME TRACKING (This Project)                  |
+ |  backfill_strategy1_outcomes.py  - Strategy 1 backtest        |
+ |  daily_prediction_job.py         - Strategy 2 backtest        |
+ |  daily_signal_tracking_job.py    - Signal backtest            |
+ +-------------------------------------------------------------+
+    |
+    v
+ +------------------+  +------------------+  +------------------+
+ | STREAMLIT        |  | POWER BI         |  | AGENTIC AI       |
+ | DASHBOARD        |  | REPORTS          |  | (Multi-Agent)    |
+ | (This Project)   |  | (PBIP Git Repo)  |  |                  |
+ | Display, Analyze |  | Strategy 1 & 2   |  | stockdata_       |
+ | Enter Data       |  | Views & Reports  |  |   agenticai/     |
+ +------------------+  +------------------+  +------------------+
+```
+        """)
+
+    with col2:
+        st.markdown("#### Quick Stats")
+        try:
+            conn = get_connection()
+            if conn:
+                stats = pd.read_sql("""
+                    SELECT 
+                        (SELECT COUNT(*) FROM nse_500_hist_data) as nse_rows,
+                        (SELECT COUNT(*) FROM nasdaq_100_hist_data) as nasdaq_rows,
+                        (SELECT COUNT(*) FROM forex_hist_data) as forex_rows,
+                        (SELECT COUNT(*) FROM ai_prediction_history) as s2_predictions,
+                        (SELECT COUNT(*) FROM signal_tracking_history) as signals,
+                        (SELECT COUNT(*) FROM ml_nse_trading_predictions) as s1_nse,
+                        (SELECT COUNT(*) FROM ml_trading_predictions) as s1_nasdaq,
+                        (SELECT COUNT(*) FROM forex_ml_predictions) as s1_forex
+                """, conn)
+                conn.close()
+
+                st.metric("NSE 500 History", f"{stats['nse_rows'].iloc[0]:,}")
+                st.metric("NASDAQ 100 History", f"{stats['nasdaq_rows'].iloc[0]:,}")
+                st.metric("Forex History", f"{stats['forex_rows'].iloc[0]:,}")
+                st.markdown("---")
+                st.metric("Strategy 1 (NSE)", f"{stats['s1_nse'].iloc[0]:,}")
+                st.metric("Strategy 1 (NASDAQ)", f"{stats['s1_nasdaq'].iloc[0]:,}")
+                st.metric("Strategy 1 (Forex)", f"{stats['s1_forex'].iloc[0]:,}")
+                st.metric("Strategy 2 (All)", f"{stats['s2_predictions'].iloc[0]:,}")
+                st.metric("Signal Tracking", f"{stats['signals'].iloc[0]:,}")
+        except Exception as e:
+            st.warning(f"Could not load stats: {e}")
+
+    st.markdown("---")
+
+    # ---- PROJECT DETAILS ----
+    st.header("Project Details")
+
+    # Strategy 1 Projects
+    st.subheader("Strategy 1 -- Independent ML Prediction Projects")
+    st.markdown("""
+    Three separate projects, each specialized for one market. They generate **signal-based predictions** 
+    (Buy/Sell/Hold with confidence scores) and write to their own dedicated tables. 
+    Models are retrained weekly.
+    """)
+
+    s1_col1, s1_col2, s1_col3 = st.columns(3)
+
+    with s1_col1:
+        st.markdown("""
+        **NASDAQ 100 ML**  
+        `Desktop/sqlserver_copilot/`
+
+        | Attribute | Value |
+        |-----------|-------|
+        | Table | `ml_trading_predictions` |
+        | Summary | `ml_prediction_summary` |
+        | Indicators | `ml_technical_indicators` |
+        | Models | Ensemble Classifier |
+        | Signals | Overbought (Sell), Oversold (Buy) |
+        | Retraining | Weekly |
+        | Outcome Table | `ml_trading_predictions` (backfilled) |
+        """)
+
+    with s1_col2:
+        st.markdown("""
+        **NSE 500 ML**  
+        `Desktop/sqlserver_copilot_nse/`
+
+        | Attribute | Value |
+        |-----------|-------|
+        | Table | `ml_nse_trading_predictions` |
+        | Summary | `ml_nse_predict_summary` |
+        | Indicators | `ml_nse_technical_indicators` |
+        | Models | ExtraTreesClassifier, NSE_Ensemble |
+        | Signals | Buy, Sell |
+        | Retraining | Weekly |
+        | Outcome Table | `ml_nse_trading_predictions` (backfilled) |
+        """)
+
+    with s1_col3:
+        st.markdown("""
+        **Forex ML**  
+        `Desktop/sqlserver_copilot_forex/`
+
+        | Attribute | Value |
+        |-----------|-------|
+        | Table | `forex_ml_predictions` |
+        | Performance | `forex_model_performance` |
+        | Features | `forex_prediction_features` |
+        | Models | daily_automation_model |
+        | Signals | BUY, SELL, HOLD |
+        | Retraining | Weekly |
+        | Outcome Table | `forex_ml_predictions` (backfilled) |
+        """)
+
+    st.markdown("---")
+
+    # Strategy 2
+    st.subheader("Strategy 2 -- Unified Price Regression with Active Learning")
+    st.markdown("""
+    A single project covering all three markets. Generates **price predictions** (predicted price and percentage change) 
+    for 1, 3, and 7 days ahead. Uses active learning to self-improve by tracking historical model accuracy 
+    and adjusting confidence scores based on past performance.
+    """)
+
+    st.markdown("""
+    `Desktop/streamlit-trading-dashboard/daily_prediction_job.py`
+
+    | Attribute | Value |
+    |-----------|-------|
+    | Table | `ai_prediction_history` |
+    | Watchlist | `prediction_watchlist` |
+    | Models | Random Forest, Gradient Boosting, Linear Regression (XGBoost if available) |
+    | Prediction Type | Exact price + percentage change for 1, 3, 7 days |
+    | Active Learning | Yes -- skips models < 45% direction accuracy, boosts confident models |
+    | Confidence | Weighted formula: 50% direction + 20% magnitude + 15% R-squared + 15% consistency |
+    | Outcome Tracking | Built-in via `update_actual_prices()` |
+    """)
+
+    st.markdown("---")
+
+    # Signal Tracking
+    st.subheader("Signal Tracking -- Technical Indicator Performance")
+    st.markdown("""
+    Tracks how technical indicator signals (from the Double/Triple Strategy views) perform over 7, 14, and 30 day windows.
+    """)
+
+    st.markdown("""
+    `Desktop/streamlit-trading-dashboard/daily_signal_tracking_job.py`
+
+    | Attribute | Value |
+    |-----------|-------|
+    | Table | `signal_tracking_history` |
+    | Indicators Tracked | MACD, RSI, Bollinger Bands, SMA, Stochastic, Fibonacci, Chart Patterns |
+    | Signal Types | BULLISH, BEARISH (strength 2-7 based on aligned indicators) |
+    | Evaluation Windows | 7-day, 14-day, 30-day |
+    | Outcome Tracking | WIN / LOSS / NEUTRAL for each window |
+    | Backfill Script | `backfill_signal_history.py` (last 70 days) |
+    """)
+
+    st.markdown("---")
+
+    # Outcome Tracking
+    st.subheader("Outcome Tracking -- Strategy 1 Backfill")
+    st.markdown("""
+    Backfills actual returns into the Strategy 1 prediction tables so their accuracy can be measured 
+    and compared against Strategy 2.
+    """)
+
+    st.markdown("""
+    `Desktop/streamlit-trading-dashboard/backfill_strategy1_outcomes.py`
+
+    | Attribute | Value |
+    |-----------|-------|
+    | Tables Updated | `ml_trading_predictions`, `ml_nse_trading_predictions`, `forex_ml_predictions` |
+    | Metrics | actual_return_1d, actual_return_5d, actual_return_10d |
+    | Direction | direction_correct_1d, direction_correct_5d |
+    | Accuracy | prediction_accuracy (Correct / Incorrect / Pending) |
+    | Method | Batch SQL with ROW_NUMBER for Nth trading day lookup |
+    """)
+
+    st.markdown("---")
+
+    # Visualization Layer
+    st.subheader("Visualization & Reporting Layer")
+
+    v_col1, v_col2, v_col3 = st.columns(3)
+
+    with v_col1:
+        st.markdown("""
+        **Streamlit Dashboard**  
+        `Desktop/streamlit-trading-dashboard/`
+
+        - Technical Analysis
+        - AI Prediction Backtesting
+        - Signal Performance
+        - Portfolio Tracker
+        - Master Data Editor
+        - Stock Notes & Journal
+        """)
+
+    with v_col2:
+        st.markdown("""
+        **Power BI Reports**  
+        `Desktop/PowerBI_StockData_Analytics_202601/`
+
+        - PBIP format (Git versioned)
+        - Strategy 1 performance views
+        - Strategy 2 performance views
+        - Signal tracking dashboards
+        - Market overview reports
+        """)
+
+    with v_col3:
+        st.markdown("""
+        **Agentic AI**  
+        `Desktop/stockdata_agenticai/`
+
+        - Multi-agent system
+        - Natural language queries
+        - Automated analysis
+        - Cross-strategy insights
+        """)
+
+    st.markdown("---")
+
+    # Database Schema
+    st.subheader("Database Tables Reference")
+
+    tables_data = {
+        "Category": [
+            "Historical Data", "Historical Data", "Historical Data",
+            "Fundamentals", "Fundamentals",
+            "Strategy 1", "Strategy 1", "Strategy 1",
+            "Strategy 1 Summary", "Strategy 1 Summary",
+            "Strategy 2", "Strategy 2 Config",
+            "Signal Tracking",
+            "User Data", "User Data", "User Data", "User Data",
+            "System", "System"
+        ],
+        "Table": [
+            "nse_500_hist_data", "nasdaq_100_hist_data", "forex_hist_data",
+            "nse_500_fundamentals", "nasdaq_100_fundamentals",
+            "ml_nse_trading_predictions", "ml_trading_predictions", "forex_ml_predictions",
+            "ml_nse_predict_summary", "ml_prediction_summary",
+            "ai_prediction_history", "prediction_watchlist",
+            "signal_tracking_history",
+            "portfolio_tracker", "stock_notes", "family_assets", "trade_log",
+            "bad_tickers", "trading_alerts"
+        ],
+        "Description": [
+            "NSE 500 daily OHLCV price data", "NASDAQ 100 daily OHLCV price data", "Forex pairs daily OHLCV data",
+            "NSE 500 company fundamentals (PE, Market Cap, etc.)", "NASDAQ 100 company fundamentals",
+            "NSE ML signal predictions (Buy/Sell + confidence)", "NASDAQ ML signal predictions (Overbought/Oversold)", "Forex ML signal predictions (BUY/SELL/HOLD + probabilities)",
+            "NSE ML daily run summaries", "NASDAQ ML daily run summaries",
+            "Strategy 2 price predictions with active learning", "Stocks selected for Strategy 2 prediction",
+            "Technical indicator signal performance (7d/14d/30d)",
+            "Personal portfolio holdings", "Stock research notes", "Family asset tracking", "Trade execution log",
+            "Tickers excluded from analysis", "Trading alert configurations"
+        ],
+        "Written By": [
+            "Data Fetch Jobs", "Data Fetch Jobs", "Data Fetch Jobs",
+            "Data Fetch Jobs", "Data Fetch Jobs",
+            "sqlserver_copilot_nse", "sqlserver_copilot", "sqlserver_copilot_forex",
+            "sqlserver_copilot_nse", "sqlserver_copilot",
+            "daily_prediction_job.py", "manage_watchlist.py",
+            "daily_signal_tracking_job.py",
+            "Streamlit Dashboard", "Streamlit Dashboard", "Streamlit Dashboard", "Streamlit Dashboard",
+            "Manual / Scripts", "Manual / Scripts"
+        ]
+    }
+    st.dataframe(pd.DataFrame(tables_data), use_container_width=True, hide_index=True)
+
+
+# =====================================================
+# OPERATIONAL PROCESS PAGE
+# =====================================================
+def show_operational_process_page():
+    """Operational processes, scheduled jobs, and workflows"""
+    st.title("Operational Process")
+    st.markdown("##### Scheduled Jobs, Workflows & Maintenance Procedures")
+    st.markdown("---")
+
+    # ---- DAILY OPERATIONS OVERVIEW ----
+    st.header("Daily Operations Flow")
+
+    st.markdown("""
+```
+ DAILY EXECUTION ORDER (Windows Task Scheduler)
+ ================================================
+
+ STEP 1: DATA FETCH (runs first -- all others depend on fresh data)
+ +-----------------------------------------------------------------+
+ |  [6:00 AM IST / 9:30 PM EST]  Data Fetch Jobs                  |
+ |  - Fetch NSE 500 OHLCV data (yfinance)                         |
+ |  - Fetch NASDAQ 100 OHLCV data (yfinance)                      |
+ |  - Fetch Forex data (yfinance / Alpha Vantage)                  |
+ |  - Writes to: nse_500_hist_data, nasdaq_100_hist_data,          |
+ |               forex_hist_data                                   |
+ |  - Location: Separate project (NOT on Desktop)                  |
+ +-----------------------------------------------------------------+
+         |
+         v
+ STEP 2: STRATEGY 1 -- ML PREDICTIONS (after fresh data arrives)
+ +-----------------------------------------------------------------+
+ |  [7:00 AM IST / 10:30 PM EST]  Three independent ML jobs        |
+ |                                                                  |
+ |  a) NSE ML Predictions    (sqlserver_copilot_nse/)               |
+ |     -> Writes to: ml_nse_trading_predictions,                    |
+ |                   ml_nse_predict_summary                         |
+ |                                                                  |
+ |  b) NASDAQ ML Predictions (sqlserver_copilot/)                   |
+ |     -> Writes to: ml_trading_predictions,                        |
+ |                   ml_prediction_summary                          |
+ |                                                                  |
+ |  c) Forex ML Predictions  (sqlserver_copilot_forex/)             |
+ |     -> Writes to: forex_ml_predictions,                          |
+ |                   forex_model_performance                        |
+ +-----------------------------------------------------------------+
+         |
+         v
+ STEP 3: STRATEGY 2 -- PRICE PREDICTIONS (after fresh data arrives)
+ +-----------------------------------------------------------------+
+ |  [8:00 AM IST / 11:00 PM EST]  daily_prediction_job.py          |
+ |  - Updates actual prices for past predictions (backtest)         |
+ |  - Generates new 1/3/7 day price predictions                    |
+ |  - Active learning adjusts model selection & confidence          |
+ |  -> Writes to: ai_prediction_history                             |
+ +-----------------------------------------------------------------+
+         |
+         v
+ STEP 4: SIGNAL TRACKING (after fresh data arrives)
+ +-----------------------------------------------------------------+
+ |  [8:30 AM IST / 11:30 PM EST]  daily_signal_tracking_job.py     |
+ |  - Detects new technical signals from crossover views            |
+ |  - Updates 7d/14d/30d results for past signals                   |
+ |  -> Writes to: signal_tracking_history                           |
+ +-----------------------------------------------------------------+
+         |
+         v
+ STEP 5: STRATEGY 1 OUTCOME BACKFILL (after fresh data arrives)
+ +-----------------------------------------------------------------+
+ |  [9:00 AM IST / 12:00 AM EST]  backfill_strategy1_outcomes.py   |
+ |  - Backfills actual returns into Strategy 1 tables               |
+ |  - Calculates direction accuracy for all 3 markets               |
+ |  -> Updates: ml_trading_predictions, ml_nse_trading_predictions, |
+ |              forex_ml_predictions                                |
+ +-----------------------------------------------------------------+
+         |
+         v
+ READY: Dashboard and Power BI reports reflect latest data
+```
+    """)
+
+    st.markdown("---")
+
+    # ---- SCHEDULED JOBS TABLE ----
+    st.header("Scheduled Jobs Reference")
+
+    jobs_data = {
+        "Job Name": [
+            "NSE Data Fetch",
+            "NASDAQ Data Fetch",
+            "Forex Data Fetch",
+            "NSE ML Predictions (Strategy 1)",
+            "NASDAQ ML Predictions (Strategy 1)",
+            "Forex ML Predictions (Strategy 1)",
+            "Strategy 2 Price Predictions",
+            "Signal Tracking Update",
+            "Strategy 1 Outcome Backfill",
+            "NSE Model Retrain",
+            "NASDAQ Model Retrain",
+            "Forex Model Retrain",
+        ],
+        "Script / Project": [
+            "Separate data fetch project",
+            "Separate data fetch project",
+            "Separate data fetch project",
+            "sqlserver_copilot_nse/",
+            "sqlserver_copilot/",
+            "sqlserver_copilot_forex/",
+            "streamlit-trading-dashboard/daily_prediction_job.py",
+            "streamlit-trading-dashboard/daily_signal_tracking_job.py",
+            "streamlit-trading-dashboard/backfill_strategy1_outcomes.py",
+            "sqlserver_copilot_nse/",
+            "sqlserver_copilot/",
+            "sqlserver_copilot_forex/",
+        ],
+        "Frequency": [
+            "Daily (Market Days)",
+            "Daily (Market Days)",
+            "Daily (Market Days)",
+            "Daily (after data fetch)",
+            "Daily (after data fetch)",
+            "Daily (after data fetch)",
+            "Daily (after data fetch)",
+            "Daily (after data fetch)",
+            "Daily (after data fetch)",
+            "Weekly (Weekend)",
+            "Weekly (Weekend)",
+            "Weekly (Weekend)",
+        ],
+        "Scheduler": [
+            "Windows Task Scheduler",
+            "Windows Task Scheduler",
+            "Windows Task Scheduler",
+            "Windows Task Scheduler",
+            "Windows Task Scheduler",
+            "Windows Task Scheduler",
+            "Windows Task Scheduler",
+            "Windows Task Scheduler",
+            "Windows Task Scheduler",
+            "Windows Task Scheduler",
+            "Windows Task Scheduler",
+            "Windows Task Scheduler",
+        ],
+        "Depends On": [
+            "Market open / data providers",
+            "Market close / data providers",
+            "Forex market data providers",
+            "NSE Data Fetch complete",
+            "NASDAQ Data Fetch complete",
+            "Forex Data Fetch complete",
+            "All Data Fetch jobs complete",
+            "All Data Fetch jobs complete",
+            "All Data Fetch + Strategy 1 complete",
+            "Sufficient historical data",
+            "Sufficient historical data",
+            "Sufficient historical data",
+        ]
+    }
+    st.dataframe(pd.DataFrame(jobs_data), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # ---- WEEKLY PROCESSES ----
+    st.header("Weekly Processes")
+
+    st.subheader("Model Retraining (Every Weekend)")
+    st.markdown("""
+    All three Strategy 1 ML projects retrain their models weekly to adapt to recent market behavior.
+
+    | Market | Project | What Happens |
+    |--------|---------|-------------|
+    | **NSE 500** | `sqlserver_copilot_nse/` | Retrains ExtraTreesClassifier and NSE_Ensemble on latest data |
+    | **NASDAQ 100** | `sqlserver_copilot/` | Retrains ensemble classifier on latest data |
+    | **Forex** | `sqlserver_copilot_forex/` | Retrains daily_automation_model on latest data |
+
+    **Strategy 2** does not need explicit retraining -- it retrains on every run using the latest 1,000 data points 
+    and uses **active learning** to adjust which models it trusts based on historical accuracy.
+    """)
+
+    st.markdown("---")
+
+    # ---- STRATEGY COMPARISON ----
+    st.header("Strategy Performance Tracking")
+
+    st.markdown("Live accuracy comparison across all strategies. Updated each time the backfill jobs run.")
+
+    try:
+        conn = get_connection()
+        if conn:
+            # Strategy 1 accuracy
+            st.subheader("Strategy 1 -- Signal Classification Accuracy")
+
+            s1_col1, s1_col2, s1_col3 = st.columns(3)
+
+            with s1_col1:
+                try:
+                    nasdaq_acc = pd.read_sql("""
+                        SELECT 
+                            COUNT(*) as total,
+                            SUM(CASE WHEN direction_correct_1d = 1 THEN 1 ELSE 0 END) as correct_1d,
+                            SUM(CASE WHEN direction_correct_1d IS NOT NULL THEN 1 ELSE 0 END) as eval_1d,
+                            SUM(CASE WHEN direction_correct_5d = 1 THEN 1 ELSE 0 END) as correct_5d,
+                            SUM(CASE WHEN direction_correct_5d IS NOT NULL THEN 1 ELSE 0 END) as eval_5d
+                        FROM ml_trading_predictions
+                    """, conn)
+                    if nasdaq_acc['eval_1d'].iloc[0] > 0:
+                        acc = nasdaq_acc['correct_1d'].iloc[0] / nasdaq_acc['eval_1d'].iloc[0] * 100
+                        st.metric("NASDAQ 1-Day Accuracy", f"{acc:.1f}%", 
+                                  f"{nasdaq_acc['eval_1d'].iloc[0]:,} evaluated")
+                    if nasdaq_acc['eval_5d'].iloc[0] > 0:
+                        acc5 = nasdaq_acc['correct_5d'].iloc[0] / nasdaq_acc['eval_5d'].iloc[0] * 100
+                        st.metric("NASDAQ 5-Day Accuracy", f"{acc5:.1f}%",
+                                  f"{nasdaq_acc['eval_5d'].iloc[0]:,} evaluated")
+                except:
+                    st.info("NASDAQ accuracy data not yet available")
+
+            with s1_col2:
+                try:
+                    nse_acc = pd.read_sql("""
+                        SELECT prediction_accuracy, COUNT(*) as cnt
+                        FROM ml_nse_trading_predictions WITH (NOLOCK)
+                        GROUP BY prediction_accuracy
+                    """, conn)
+                    correct = nse_acc[nse_acc['prediction_accuracy'] == 'Correct']['cnt'].sum()
+                    incorrect = nse_acc[nse_acc['prediction_accuracy'] == 'Incorrect']['cnt'].sum()
+                    total_eval = correct + incorrect
+                    if total_eval > 0:
+                        acc = correct / total_eval * 100
+                        st.metric("NSE 1-Day Accuracy", f"{acc:.1f}%",
+                                  f"{total_eval:,} evaluated")
+                except:
+                    st.info("NSE accuracy data not yet available")
+
+            with s1_col3:
+                try:
+                    forex_acc = pd.read_sql("""
+                        SELECT 
+                            SUM(CASE WHEN direction_correct_1d = 1 THEN 1 ELSE 0 END) as correct_1d,
+                            SUM(CASE WHEN direction_correct_1d IS NOT NULL THEN 1 ELSE 0 END) as eval_1d,
+                            SUM(CASE WHEN direction_correct_5d = 1 THEN 1 ELSE 0 END) as correct_5d,
+                            SUM(CASE WHEN direction_correct_5d IS NOT NULL THEN 1 ELSE 0 END) as eval_5d
+                        FROM forex_ml_predictions
+                    """, conn)
+                    if forex_acc['eval_1d'].iloc[0] > 0:
+                        acc = forex_acc['correct_1d'].iloc[0] / forex_acc['eval_1d'].iloc[0] * 100
+                        st.metric("Forex 1-Day Accuracy", f"{acc:.1f}%",
+                                  f"{forex_acc['eval_1d'].iloc[0]:,} evaluated")
+                    if forex_acc['eval_5d'].iloc[0] > 0:
+                        acc5 = forex_acc['correct_5d'].iloc[0] / forex_acc['eval_5d'].iloc[0] * 100
+                        st.metric("Forex 5-Day Accuracy", f"{acc5:.1f}%",
+                                  f"{forex_acc['eval_5d'].iloc[0]:,} evaluated")
+                except:
+                    st.info("Forex accuracy data not yet available")
+
+            st.markdown("---")
+
+            # Strategy 2 accuracy
+            st.subheader("Strategy 2 -- Price Regression Accuracy")
+
+            try:
+                s2_acc = pd.read_sql("""
+                    SELECT 
+                        market,
+                        COUNT(*) as evaluated,
+                        ROUND(AVG(CAST(direction_correct AS FLOAT)) * 100, 1) as direction_accuracy,
+                        ROUND(AVG(ABS(percentage_error)), 2) as avg_pct_error
+                    FROM ai_prediction_history
+                    WHERE direction_correct IS NOT NULL
+                    GROUP BY market
+                    ORDER BY market
+                """, conn)
+                if not s2_acc.empty:
+                    s2_col1, s2_col2, s2_col3 = st.columns(3)
+                    for idx, row in s2_acc.iterrows():
+                        col = [s2_col1, s2_col2, s2_col3][idx % 3]
+                        with col:
+                            st.metric(f"{row['market']} Direction",
+                                      f"{row['direction_accuracy']}%",
+                                      f"Avg error: {row['avg_pct_error']}%")
+            except:
+                st.info("Strategy 2 accuracy data not yet available")
+
+            st.markdown("---")
+
+            # Signal Tracking accuracy
+            st.subheader("Signal Tracking -- Technical Indicator Win Rates")
+
+            try:
+                sig_acc = pd.read_sql("""
+                    SELECT 
+                        market, signal_type,
+                        COUNT(*) as total_signals,
+                        SUM(CASE WHEN result_7d = 'WIN' THEN 1 ELSE 0 END) as win_7d,
+                        SUM(CASE WHEN result_7d IN ('WIN','LOSS') THEN 1 ELSE 0 END) as eval_7d,
+                        SUM(CASE WHEN result_30d = 'WIN' THEN 1 ELSE 0 END) as win_30d,
+                        SUM(CASE WHEN result_30d IN ('WIN','LOSS') THEN 1 ELSE 0 END) as eval_30d
+                    FROM signal_tracking_history
+                    WHERE result_7d IS NOT NULL
+                    GROUP BY market, signal_type
+                    ORDER BY market, signal_type
+                """, conn)
+                if not sig_acc.empty:
+                    sig_acc['win_rate_7d'] = sig_acc.apply(
+                        lambda r: f"{r['win_7d']/r['eval_7d']*100:.1f}%" if r['eval_7d'] > 0 else "N/A", axis=1)
+                    sig_acc['win_rate_30d'] = sig_acc.apply(
+                        lambda r: f"{r['win_30d']/r['eval_30d']*100:.1f}%" if r['eval_30d'] > 0 else "N/A", axis=1)
+                    st.dataframe(
+                        sig_acc[['market', 'signal_type', 'total_signals', 'win_rate_7d', 'win_rate_30d']],
+                        use_container_width=True, hide_index=True)
+            except:
+                st.info("Signal tracking data not yet available")
+
+            conn.close()
+    except Exception as e:
+        st.warning(f"Could not load performance data: {e}")
+
+    st.markdown("---")
+
+    # ---- POWER BI VIEWS ----
+    st.header("Power BI Integration")
+
+    st.markdown("""
+    The Power BI reports are maintained in a **PBIP Git repository** at:  
+    `Desktop/PowerBI_StockData_Analytics_202601/`
+
+    Power BI connects to the same SQL Server database and uses dedicated views for each strategy:
+
+    | View / Report | Purpose |
+    |---------------|---------|
+    | `vw_model_performance_summary` | Strategy 2 model accuracy by market/model/timeframe |
+    | `vw_recent_prediction_accuracy` | Strategy 2 recent predictions vs actuals |
+    | `vw_signal_performance_summary` | Signal tracking win rates by market/type/strength |
+    | `vw_pending_signal_updates` | Signals awaiting outcome evaluation |
+    | `vw_crossover_signals_*` | Technical indicator crossover detection views |
+    | Strategy 1 tables (direct) | Direct queries on ml_trading_predictions, ml_nse_trading_predictions, forex_ml_predictions |
+    """)
+
+    st.markdown("---")
+
+    # ---- AGENTIC AI ----
+    st.header("Agentic AI Integration")
+
+    st.markdown("""
+    The multi-agent system at `Desktop/stockdata_agenticai/` provides:
+
+    - **Natural language queries** against the trading database
+    - **Automated analysis** combining signals from Strategy 1, Strategy 2, and Signal Tracking
+    - **Cross-strategy insights** -- identifies when multiple strategies agree on a signal
+    - **Multi-agent architecture** with specialized agents for different analytical tasks
+    """)
+
+    st.markdown("---")
+
+    # ---- MAINTENANCE ----
+    st.header("Maintenance & Troubleshooting")
+
+    st.subheader("Database Backups")
+    st.markdown("""
+    Manual backups are stored at `Desktop/SQLServer_Database_Backup_local server/`.  
+    Regular backup schedule recommended via SQL Server Maintenance Plan.
+    """)
+
+    st.subheader("Common Issues")
+
+    with st.expander("Job failed -- Data fetch returned no data"):
+        st.markdown("""
+        - Check if the market was open that day (holidays, weekends)
+        - Verify yfinance API is accessible (may be rate-limited)
+        - Check the `bad_tickers` table for tickers that consistently fail
+        - Re-run the data fetch job manually
+        """)
+
+    with st.expander("Strategy 1 predictions not appearing"):
+        st.markdown("""
+        - Verify the data fetch job completed first (check historical data tables for today's date)
+        - Check if the ML project's scheduled task ran (Windows Task Scheduler)
+        - Look for error logs in the project folder
+        - Re-run the prediction script manually from the project directory
+        """)
+
+    with st.expander("Strategy 2 confidence scores seem off"):
+        st.markdown("""
+        - Check `CONFIDENCE_MULTIPLIER` in `daily_prediction_job.py` (currently 1.3)
+        - Review active learning thresholds: `MIN_DIRECTION_ACCURACY = 0.45`
+        - Check if models are being skipped due to poor performance (see logs)
+        - Review `prediction_watchlist` for the correct stocks
+        """)
+
+    with st.expander("Backfill shows 0 updates"):
+        st.markdown("""
+        - Predictions may be too recent (actual price data not yet available)
+        - Check if historical data has been fetched for the target dates
+        - Verify ticker names match between prediction and historical tables
+        - Run `backfill_strategy1_outcomes.py` manually and check logs
+        """)
+
+    with st.expander("Database connection timeouts"):
+        st.markdown("""
+        - Large tables (ml_nse_trading_predictions) may need index rebuilds after mass updates
+        - Use `WITH (NOLOCK)` for read-only queries on large tables
+        - Check SQL Server memory and CPU usage
+        - Click "Reset Database Connections" in the sidebar
+        """)
+
+    st.subheader("Useful Management Scripts")
+    st.markdown("""
+    | Script | Purpose |
+    |--------|---------|
+    | `manage_watchlist.py` | Add/remove tickers from Strategy 2 prediction watchlist |
+    | `backfill_signal_history.py` | One-time backfill of 70 days historical signals |
+    | `backfill_strategy1_outcomes.py` | Backfill actual returns for Strategy 1 tables |
+    | SQL backup scripts | Located in `SQLServer_Database_Backup_local server/` |
+    """)
+
+
 # Main application routing
 if page == "🏠 Home & Filters":
     show_home_page()
@@ -10875,9 +11624,9 @@ elif page == "📈 Technical Analysis":
     show_technical_analysis_page()
 # elif page == "🤖 AI Price Predictions":
 #     show_ml_prediction_page()  # REMOVED - Use Backtesting Analytics instead
-elif page == "� Backtesting Analytics":
+elif page == "📊 Backtesting Analytics":
     show_backtesting_analytics_dashboard()
-elif page == "�🛩️ Flight Status Dashboard":
+elif page == "🛩️ Flight Status Dashboard":
     show_flight_status_page()
 # REMOVED - Use Backtesting Analytics for all ML predictions (NSE, NASDAQ, Forex)
 # elif page == "📊 NASDAQ ML Predictions":
@@ -10894,11 +11643,15 @@ elif page == "📊 Master Data Editor":
     show_master_data_editor()
 elif page == "💼 My Portfolio Tracker":
     show_portfolio_tracker()
-elif page == "� Stock Notes & Journal":
+elif page == "📝 Stock Notes & Journal":
     show_stock_notes_journal()
-elif page == "�👨‍👩‍👧‍👦 For Family":
+elif page == "👨‍👩‍👧‍👦 For Family":
     show_family_assets_page()
 elif page == "🎯 Double/Triple Strategy":
     show_ai_trading_signals_scanner()
 elif page == "💰 Fundamental Analysis":
     show_fundamental_analysis_page()
+elif page == "🏗️ Architecture":
+    show_architecture_page()
+elif page == "⚙️ Operational Process":
+    show_operational_process_page()
