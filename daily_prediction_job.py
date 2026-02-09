@@ -1,52 +1,37 @@
 """
-Daily AI Price Prediction Job
-==============================
+Daily AI Price Prediction Job (Strategy 2)
+============================================
 Runs daily to:
-1. Generate predictions for all markets and models
-2. Store predictions in database
-3. Update actual prices for past predictions
-4. Calculate accuracy metrics
+1. Update actual prices for past predictions (backtest)
+2. Generate new predictions for all markets and models
+3. Store predictions in ai_prediction_history
+4. Active learning adjusts model selection & confidence
 
-Schedule this to run daily via Windows Task Scheduler
+Schedule this to run daily via Windows Task Scheduler.
 """
 
 import pandas as pd
 import numpy as np
 import pyodbc
 from datetime import datetime, timedelta
+import traceback
+import sys
 import warnings
 warnings.filterwarnings('ignore')
 
+# Force unbuffered output so logs appear immediately in Task Scheduler
+sys.stdout.reconfigure(line_buffering=True)
+
 # Import ML libraries
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.linear_model import LinearRegression
+
 try:
     import xgboost as xgb
     XGBOOST_AVAILABLE = True
-except:
+except ImportError:
     XGBOOST_AVAILABLE = False
-
-try:
-    import lightgbm as lgb
-    LIGHTGBM_AVAILABLE = True
-except:
-    LIGHTGBM_AVAILABLE = False
-
-try:
-    from tensorflow import keras
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    from tensorflow.keras.optimizers import Adam
-    LSTM_AVAILABLE = True
-except:
-    LSTM_AVAILABLE = False
-
-try:
-    from prophet import Prophet
-    PROPHET_AVAILABLE = True
-except:
-    PROPHET_AVAILABLE = False
 
 # Database connection
 def get_db_connection():
@@ -73,6 +58,10 @@ MIN_DATA_POINTS = 100  # Minimum historical data required
 # Confidence boost for direction-based trading (since direction accuracy is good)
 CONFIDENCE_MULTIPLIER = 1.3  # Boost confidence by 30% for practical usability
 
+# Unified confidence bounds (used everywhere)
+CONFIDENCE_MIN = 30
+CONFIDENCE_MAX = 85
+
 # =====================================================
 # ACTIVE LEARNING CONFIGURATION
 # =====================================================
@@ -86,17 +75,18 @@ HISTORICAL_LOOKBACK_DAYS = 90  # Look back 90 days for performance analysis
 # =====================================================
 USE_WATCHLIST = True  # Set to True to use watchlist, False for top volume stocks
 
+# Columns to exclude from ML features (raw values that don't generalize across stocks)
+EXCLUDE_FROM_FEATURES = ['trading_date', 'close_price', 'high_price', 'low_price', 'volume', 'target']
+
 def log_message(message, level="INFO"):
     """Print timestamped log message"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     # Remove emojis that cause encoding issues in Windows console
     message = message.encode('ascii', 'ignore').decode('ascii')
-    print(f"[{timestamp}] [{level}] {message}")
+    print(f"[{timestamp}] [{level}] {message}", flush=True)
 
-def get_watchlist_stocks(market):
+def get_watchlist_stocks(conn, market):
     """Get stocks from database watchlist table"""
-    conn = get_db_connection()
-    
     query = """
     SELECT ticker, company_name
     FROM prediction_watchlist
@@ -105,11 +95,10 @@ def get_watchlist_stocks(market):
     """
     
     df = pd.read_sql(query, conn, params=[market])
-    conn.close()
     
     if len(df) == 0:
         log_message(f"No active tickers in watchlist for {market}, falling back to top volume", "WARNING")
-        return get_top_volume_stocks(market, MAX_STOCKS_PER_MARKET)
+        return get_top_volume_stocks(conn, market, MAX_STOCKS_PER_MARKET)
     
     log_message(f"Loaded {len(df)} stocks from watchlist table for {market}")
     return df
@@ -209,9 +198,6 @@ def adjust_confidence_with_history(confidence, model_name, performance_history):
     direction_acc = perf['direction_accuracy']
     
     # Adjust confidence based on actual historical accuracy
-    # If model historically gets 60% direction accuracy, boost confidence
-    # If model historically gets 45% direction accuracy, reduce confidence
-    
     if direction_acc >= 0.60:
         adjustment = 1.15  # +15% for strong performers
     elif direction_acc >= 0.55:
@@ -230,15 +216,14 @@ def adjust_confidence_with_history(confidence, model_name, performance_history):
     elif error_vol > 8.0:  # Very volatile
         adjusted_confidence *= 0.95
     
-    # Keep within bounds
-    adjusted_confidence = max(30, min(85, adjusted_confidence))
+    # Keep within unified bounds
+    adjusted_confidence = max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, adjusted_confidence))
     
     return adjusted_confidence
 
 
-def get_top_volume_stocks(market, limit=50):
+def get_top_volume_stocks(conn, market, limit=50):
     """Get top stocks by trading volume for a market"""
-    conn = get_db_connection()
     config = MARKETS[market]
     
     query = f"""
@@ -253,19 +238,17 @@ def get_top_volume_stocks(market, limit=50):
     """
     
     df = pd.read_sql(query, conn)
-    conn.close()
     return df
 
-def get_top_stocks(market, limit=50):
+def get_top_stocks(conn, market, limit=50):
     """Get stocks based on configuration (watchlist or top volume)"""
     if USE_WATCHLIST:
-        return get_watchlist_stocks(market)
+        return get_watchlist_stocks(conn, market)
     else:
-        return get_top_volume_stocks(market, limit)
+        return get_top_volume_stocks(conn, market, limit)
 
-def load_stock_data(market, ticker):
+def load_stock_data(conn, market, ticker):
     """Load historical data for a stock"""
-    conn = get_db_connection()
     config = MARKETS[market]
     
     query = f"""
@@ -281,7 +264,6 @@ def load_stock_data(market, ticker):
     """
     
     df = pd.read_sql(query, conn, params=[ticker])
-    conn.close()
     
     if len(df) < MIN_DATA_POINTS:
         return None
@@ -307,10 +289,14 @@ def calculate_technical_indicators(df):
     df['returns'] = df['close_price'].pct_change()
     df['log_returns'] = np.log(df['close_price'] / df['close_price'].shift(1))
     
-    # Moving averages
+    # Moving averages (as ratios to close price for cross-stock comparability)
     for period in [5, 10, 20, 50]:
         df[f'sma_{period}'] = df['close_price'].rolling(window=period).mean()
+        df[f'sma_{period}_ratio'] = df['close_price'] / df[f'sma_{period}']
         df[f'ema_{period}'] = df['close_price'].ewm(span=period, adjust=False).mean()
+        df[f'ema_{period}_ratio'] = df['close_price'] / df[f'ema_{period}']
+        # Drop raw SMA/EMA (keep only ratios which are scale-independent)
+        df.drop(columns=[f'sma_{period}', f'ema_{period}'], inplace=True)
     
     # Volatility
     df['volatility_20'] = df['returns'].rolling(window=20).std()
@@ -322,29 +308,29 @@ def calculate_technical_indicators(df):
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # MACD
+    # MACD (as percentage of price for cross-stock comparability)
     ema12 = df['close_price'].ewm(span=12, adjust=False).mean()
     ema26 = df['close_price'].ewm(span=26, adjust=False).mean()
-    df['macd'] = ema12 - ema26
+    df['macd'] = (ema12 - ema26) / df['close_price'] * 100
     df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
     
-    # Bollinger Bands
-    df['bb_middle'] = df['close_price'].rolling(window=20).mean()
+    # Bollinger Bands (as positions, not absolute values)
+    bb_middle = df['close_price'].rolling(window=20).mean()
     bb_std = df['close_price'].rolling(window=20).std()
-    df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
-    df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
+    bb_upper = bb_middle + (bb_std * 2)
+    bb_lower = bb_middle - (bb_std * 2)
     
     # Volume features (handle forex with zero volume)
-    df['volume_sma_20'] = df['volume'].rolling(window=20).mean()
-    # For forex pairs where volume is always 0, set volume_ratio to 1
-    df['volume_ratio'] = df['volume'] / df['volume_sma_20'].replace(0, 1)
+    volume_sma_20 = df['volume'].rolling(window=20).mean()
+    df['volume_ratio'] = df['volume'] / volume_sma_20.replace(0, 1)
     df['volume_ratio'] = df['volume_ratio'].fillna(1.0)
+    # Cap extreme volume ratios
+    df['volume_ratio'] = df['volume_ratio'].clip(upper=10.0)
     
     # Price momentum
     df['momentum_5'] = df['close_price'] / df['close_price'].shift(5) - 1
     df['momentum_10'] = df['close_price'] / df['close_price'].shift(10) - 1
     
-    # Additional advanced features for better predictions
     # High-Low Range (volatility indicator)
     df['hl_range'] = (df['high_price'] - df['low_price']) / df['close_price']
     df['hl_range_ma'] = df['hl_range'].rolling(window=10).mean()
@@ -352,8 +338,11 @@ def calculate_technical_indicators(df):
     # Price position within range
     df['price_position'] = (df['close_price'] - df['low_price']) / (df['high_price'] - df['low_price'] + 1e-8)
     
-    # Bollinger Band position
-    df['bb_position'] = (df['close_price'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'] + 1e-8)
+    # Bollinger Band position (0 = at lower band, 1 = at upper band)
+    df['bb_position'] = (df['close_price'] - bb_lower) / (bb_upper - bb_lower + 1e-8)
+    
+    # BB width (normalized volatility measure)
+    df['bb_width'] = (bb_upper - bb_lower) / bb_middle
     
     # RSI momentum
     df['rsi_change'] = df['rsi'].diff()
@@ -361,17 +350,24 @@ def calculate_technical_indicators(df):
     # MACD histogram
     df['macd_histogram'] = df['macd'] - df['macd_signal']
     
-    # Trend strength (ADX-like indicator)
-    df['trend_strength'] = df['close_price'].rolling(window=14).apply(
-        lambda x: abs(x.iloc[-1] - x.iloc[0]) / x.std() if x.std() > 0 else 0, raw=False
-    )
+    # Trend strength (ADX-like indicator) -- optimized with raw=True
+    close_values = df['close_price'].values
+    trend_strength = np.full(len(close_values), np.nan)
+    for i in range(13, len(close_values)):
+        window = close_values[i-13:i+1]
+        std = np.std(window)
+        if std > 0:
+            trend_strength[i] = abs(window[-1] - window[0]) / std
+        else:
+            trend_strength[i] = 0
+    df['trend_strength'] = trend_strength
     
     return df.dropna()
 
 def train_and_predict(df, days_ahead, model_name='XGBoost'):
     """Train model and make prediction"""
-    # Prepare features
-    feature_cols = [col for col in df.columns if col not in ['trading_date', 'close_price', 'target']]
+    # Prepare features -- exclude raw price/volume columns and date
+    feature_cols = [col for col in df.columns if col not in EXCLUDE_FROM_FEATURES]
     
     # Create target (future return)
     df_model = df.copy()
@@ -400,7 +396,7 @@ def train_and_predict(df, days_ahead, model_name='XGBoost'):
     latest_features = df[feature_cols].iloc[-1:].values
     latest_features_scaled = scaler.transform(latest_features)
     
-    # Train model with improved hyperparameters
+    # Train model
     try:
         if model_name == 'XGBoost' and XGBOOST_AVAILABLE:
             model = xgb.XGBRegressor(
@@ -412,16 +408,6 @@ def train_and_predict(df, days_ahead, model_name='XGBoost'):
                 colsample_bytree=0.8,
                 random_state=42, 
                 verbosity=0
-            )
-        elif model_name == 'LightGBM' and LIGHTGBM_AVAILABLE:
-            model = lgb.LGBMRegressor(
-                n_estimators=150, 
-                learning_rate=0.05, 
-                max_depth=6, 
-                num_leaves=31,
-                subsample=0.8,
-                random_state=42, 
-                verbose=-1
             )
         elif model_name == 'Random Forest':
             model = RandomForestRegressor(
@@ -448,7 +434,7 @@ def train_and_predict(df, days_ahead, model_name='XGBoost'):
         model.fit(X_train_scaled, y_train)
         predicted_change = model.predict(latest_features_scaled)[0]
         
-        # Calculate confidence based on validation performance (IMPROVED)
+        # Calculate confidence based on validation performance
         if len(X_test) > 0:
             y_pred_test = model.predict(X_test_scaled)
             
@@ -462,7 +448,7 @@ def train_and_predict(df, days_ahead, model_name='XGBoost'):
             mean_abs_return = np.mean(np.abs(y_test))
             magnitude_accuracy = max(0, (1 - mae / (mean_abs_return + 1e-8)) * 100)
             
-            # 3. R² Score (variance explained)
+            # 3. R-squared Score (variance explained)
             ss_res = np.sum((y_test - y_pred_test) ** 2)
             ss_tot = np.sum((y_test - np.mean(y_test)) ** 2)
             r2_score = max(0, 1 - ss_res / (ss_tot + 1e-8))
@@ -473,8 +459,7 @@ def train_and_predict(df, days_ahead, model_name='XGBoost'):
             actual_std = np.std(y_test)
             consistency = max(0, 100 - abs(pred_std - actual_std) / (actual_std + 1e-8) * 100)
             
-            # IMPROVED FORMULA: Emphasize direction accuracy (most useful for trading)
-            # 50% direction + 20% magnitude + 15% R² + 15% consistency
+            # Weighted formula: 50% direction + 20% magnitude + 15% R-squared + 15% consistency
             confidence = (
                 0.50 * direction_accuracy + 
                 0.20 * magnitude_accuracy + 
@@ -489,11 +474,10 @@ def train_and_predict(df, days_ahead, model_name='XGBoost'):
                 confidence *= 1.15  # Boost confidence with large test set
             
             # Apply confidence multiplier for practical usability
-            # (Direction accuracy is often 55-60% which is valuable for trading)
             confidence *= CONFIDENCE_MULTIPLIER
             
-            # More realistic bounds: 35-80%
-            confidence = max(35, min(80, confidence))
+            # Unified bounds
+            confidence = max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, confidence))
         else:
             confidence = 50.0  # Default if no test data
         
@@ -524,7 +508,7 @@ def train_and_predict_with_feedback(df, days_ahead, model_name, performance_hist
             # Log adjustment if significant
             if abs(adjusted_confidence - base_confidence) > 3:
                 log_message(
-                    f"      {model_name}: Confidence adjusted {base_confidence:.1f}% → {adjusted_confidence:.1f}% "
+                    f"      {model_name}: Confidence adjusted {base_confidence:.1f}% -> {adjusted_confidence:.1f}% "
                     f"(historical accuracy: {performance_history.get(model_name, {}).get('direction_accuracy', 0.5):.1%})",
                     "INFO"
                 )
@@ -537,14 +521,25 @@ def train_and_predict_with_feedback(df, days_ahead, model_name, performance_hist
         log_message(f"Model training error for {model_name}: {str(e)}", "ERROR")
         return None, None
 
-def store_prediction(conn, market, ticker, company_name, days_ahead, model_name, 
+def store_prediction(cursor, market, ticker, company_name, days_ahead, model_name, 
                     current_price, predicted_change, confidence):
-    """Store prediction in database"""
+    """
+    Store prediction in database. 
+    Skips if a prediction already exists for this market/ticker/date/days_ahead/model.
+    Uses the cursor passed from the main function (no separate commit -- batched).
+    """
     prediction_date = datetime.now().date()
     target_date = prediction_date + timedelta(days=days_ahead)
     predicted_price = current_price * (1 + predicted_change)
     
-    cursor = conn.cursor()
+    # Check for duplicate before inserting
+    dup_check = """
+    SELECT COUNT(*) FROM ai_prediction_history 
+    WHERE market = ? AND ticker = ? AND prediction_date = ? AND days_ahead = ? AND model_name = ?
+    """
+    cursor.execute(dup_check, (market, ticker, str(prediction_date), days_ahead, model_name))
+    if cursor.fetchone()[0] > 0:
+        return False  # Duplicate, skip
     
     query = """
     INSERT INTO ai_prediction_history 
@@ -553,109 +548,95 @@ def store_prediction(conn, market, ticker, company_name, days_ahead, model_name,
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     
-    # Convert dates to strings for pyodbc compatibility
     cursor.execute(query, (
         market, ticker, company_name, str(prediction_date), str(target_date), days_ahead, model_name,
         float(current_price), float(predicted_price), float(predicted_change * 100), float(confidence)
     ))
     
-    conn.commit()
+    return True  # Inserted
 
 def update_actual_prices(conn):
-    """Update actual prices for past predictions where target_date has arrived"""
+    """
+    Update actual prices for past predictions where target_date has arrived.
+    Uses batch SQL for performance instead of row-by-row.
+    """
     today = datetime.now().date()
-    
     cursor = conn.cursor()
     
-    # Get predictions where target_date <= today and actual_price is NULL
-    query = """
-    SELECT prediction_id, market, ticker, target_date, predicted_price, predicted_change_pct
-    FROM ai_prediction_history
-    WHERE target_date <= ? AND actual_price IS NULL
-    """
+    # Count pending first
+    cursor.execute("""
+        SELECT COUNT(*) FROM ai_prediction_history 
+        WHERE target_date <= ? AND actual_price IS NULL
+    """, (str(today),))
+    pending_count = cursor.fetchone()[0]
+    log_message(f"Found {pending_count} predictions to update with actual prices")
     
-    # Convert date to string for pyodbc compatibility
-    cursor.execute(query, (str(today),))
-    pending_predictions = cursor.fetchall()
+    if pending_count == 0:
+        return
     
-    log_message(f"Found {len(pending_predictions)} predictions to update")
+    total_updated = 0
     
-    updated = 0
-    for pred in pending_predictions:
-        pred_id, market, ticker, target_date, predicted_price, predicted_change_pct = pred
+    # Batch update for each market (uses JOIN for performance)
+    for market, config in MARKETS.items():
+        table = config['table']
+        symbol_col = config['symbol_col']
         
-        # Get actual price on target_date
-        config = MARKETS[market]
-        price_query = f"""
-        SELECT TOP 1 close_price
-        FROM {config['table']}
-        WHERE {config['symbol_col']} = ? 
-          AND trading_date <= ?
-        ORDER BY trading_date DESC
+        # Update actual prices using batch SQL with JOIN
+        # Uses trading_date <= target_date to find the closest available price
+        update_sql = f"""
+        UPDATE p
+        SET 
+            p.actual_price = CAST(h.close_price AS FLOAT),
+            p.actual_change_pct = ((CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT)) * 100,
+            p.absolute_error = ABS(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT)),
+            p.squared_error = POWER(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT), 2),
+            p.percentage_error = ABS(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT)) / CAST(h.close_price AS FLOAT) * 100,
+            p.direction_correct = CASE 
+                WHEN p.predicted_change_pct > 0.01 AND CAST(h.close_price AS FLOAT) > CAST(p.current_price AS FLOAT) THEN 1
+                WHEN p.predicted_change_pct < -0.01 AND CAST(h.close_price AS FLOAT) < CAST(p.current_price AS FLOAT) THEN 1
+                WHEN ABS(p.predicted_change_pct) <= 0.01 AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT) < 0.005 THEN 1
+                ELSE 0
+            END,
+            p.updated_at = GETDATE()
+        FROM ai_prediction_history p
+        CROSS APPLY (
+            SELECT TOP 1 close_price
+            FROM {table}
+            WHERE {symbol_col} = p.ticker 
+              AND trading_date <= p.target_date
+            ORDER BY trading_date DESC
+        ) h
+        WHERE p.market = ?
+          AND p.target_date <= ?
+          AND p.actual_price IS NULL
         """
         
-        # Convert target_date to string for pyodbc compatibility
-        cursor.execute(price_query, (ticker, str(target_date)))
-        result = cursor.fetchone()
-        
-        if result:
-            actual_price = float(result[0])  # Convert to float
-            
-            # Get the original price to calculate actual change
-            original_query = """
-            SELECT current_price FROM ai_prediction_history WHERE prediction_id = ?
-            """
-            cursor.execute(original_query, (pred_id,))
-            current_price = float(cursor.fetchone()[0])  # Convert to float
-            
-            # Convert predicted values to float as well
-            predicted_price = float(predicted_price)
-            predicted_change_pct = float(predicted_change_pct)
-            
-            actual_change_pct = ((actual_price - current_price) / current_price) * 100
-            absolute_error = abs(predicted_price - actual_price)
-            squared_error = (predicted_price - actual_price) ** 2
-            percentage_error = (absolute_error / actual_price) * 100
-            
-            # Check if direction was correct
-            direction_correct = (predicted_change_pct > 0 and actual_change_pct > 0) or \
-                              (predicted_change_pct < 0 and actual_change_pct < 0) or \
-                              (predicted_change_pct == 0 and actual_change_pct == 0)
-            
-            # Update the record
-            update_query = """
-            UPDATE ai_prediction_history
-            SET actual_price = ?,
-                actual_change_pct = ?,
-                absolute_error = ?,
-                squared_error = ?,
-                percentage_error = ?,
-                direction_correct = ?,
-                updated_at = GETDATE()
-            WHERE prediction_id = ?
-            """
-            
-            cursor.execute(update_query, (
-                actual_price, actual_change_pct, absolute_error, squared_error,
-                percentage_error, direction_correct, pred_id
-            ))
-            
-            updated += 1
+        try:
+            cursor.execute(update_sql, (market, str(today)))
+            updated = cursor.rowcount
+            total_updated += updated
+            if updated > 0:
+                log_message(f"  {market}: Updated {updated} predictions with actual prices")
+        except Exception as e:
+            log_message(f"  {market}: Error updating actual prices: {str(e)}", "ERROR")
     
     conn.commit()
-    log_message(f"Updated {updated} predictions with actual prices")
+    log_message(f"Total updated: {total_updated} predictions with actual prices")
 
 def run_daily_predictions():
     """Main function to run daily predictions with ACTIVE LEARNING"""
+    start_time = datetime.now()
+    
     log_message("=" * 80)
-    log_message("Starting Daily AI Price Prediction Job")
+    log_message("Starting Daily AI Price Prediction Job (Strategy 2)")
     if USE_ACTIVE_LEARNING:
         log_message("ACTIVE LEARNING ENABLED - Using historical performance feedback")
     log_message("=" * 80)
     
     conn = get_db_connection()
+    cursor = conn.cursor()
     
-    # First, update actual prices for past predictions
+    # Step 1: Update actual prices for past predictions (backtest)
     log_message("Step 1: Updating actual prices for past predictions...")
     update_actual_prices(conn)
     
@@ -663,18 +644,24 @@ def run_daily_predictions():
     all_models = ['XGBoost', 'Random Forest', 'Gradient Boosting']
     if not XGBOOST_AVAILABLE:
         all_models = ['Random Forest', 'Gradient Boosting', 'Linear Regression']
+    log_message(f"Models available: {', '.join(all_models)}")
     
     total_predictions = 0
+    total_skipped_dup = 0
+    total_skipped_data = 0
     models_skipped = 0
-    models_adjusted = 0
+    errors = 0
     
-    # Generate predictions for each market
+    # Step 2: Generate predictions for each market
     for market in MARKETS.keys():
         log_message(f"\nStep 2: Processing {market}...")
+        market_start = datetime.now()
         
-        # Get top stocks
-        stocks = get_top_stocks(market, MAX_STOCKS_PER_MARKET)
+        # Get stocks (reuse connection)
+        stocks = get_top_stocks(conn, market, MAX_STOCKS_PER_MARKET)
         log_message(f"  Found {len(stocks)} stocks to analyze")
+        
+        market_predictions = 0
         
         for idx, row in stocks.iterrows():
             ticker = row['ticker']
@@ -682,16 +669,18 @@ def run_daily_predictions():
             
             log_message(f"  Processing {ticker} ({company_name})...")
             
-            # Load data
-            df = load_stock_data(market, ticker)
+            # Load data (reuse connection)
+            df = load_stock_data(conn, market, ticker)
             if df is None:
                 log_message(f"    Skipping {ticker}: Insufficient data (< {MIN_DATA_POINTS} records)", "WARNING")
+                total_skipped_data += 1
                 continue
             
             # Calculate indicators
             df = calculate_technical_indicators(df)
             if len(df) < MIN_DATA_POINTS:
                 log_message(f"    Skipping {ticker}: Insufficient data after indicators ({len(df)} < {MIN_DATA_POINTS})", "WARNING")
+                total_skipped_data += 1
                 continue
             
             current_price = df['close_price'].iloc[-1]
@@ -720,34 +709,53 @@ def run_daily_predictions():
                 
                 # Generate predictions with each selected model
                 for model_name in selected_models:
-                    
-                    # ACTIVE LEARNING: Use feedback-enhanced prediction
-                    if USE_ACTIVE_LEARNING:
-                        predicted_change, confidence = train_and_predict_with_feedback(
-                            df, days_ahead, model_name, performance_history
-                        )
-                    else:
-                        predicted_change, confidence = train_and_predict(
-                            df, days_ahead, model_name
-                        )
-                    
-                    if predicted_change is not None:
-                        store_prediction(
-                            conn, market, ticker, company_name, days_ahead, model_name,
-                            current_price, predicted_change, confidence
-                        )
-                        total_predictions += 1
+                    try:
+                        # ACTIVE LEARNING: Use feedback-enhanced prediction
+                        if USE_ACTIVE_LEARNING:
+                            predicted_change, confidence = train_and_predict_with_feedback(
+                                df, days_ahead, model_name, performance_history
+                            )
+                        else:
+                            predicted_change, confidence = train_and_predict(
+                                df, days_ahead, model_name
+                            )
+                        
+                        if predicted_change is not None:
+                            inserted = store_prediction(
+                                cursor, market, ticker, company_name, days_ahead, model_name,
+                                current_price, predicted_change, confidence
+                            )
+                            if inserted:
+                                total_predictions += 1
+                                market_predictions += 1
+                            else:
+                                total_skipped_dup += 1
+                    except Exception as e:
+                        errors += 1
+                        log_message(f"    Error predicting {ticker}/{model_name}/{days_ahead}d: {str(e)}", "ERROR")
             
             if (idx + 1) % 10 == 0:
                 log_message(f"  Processed {idx + 1}/{len(stocks)} stocks...")
+        
+        # Commit after each market (batch commit)
+        conn.commit()
+        market_elapsed = (datetime.now() - market_start).total_seconds()
+        log_message(f"  {market} complete: {market_predictions} predictions in {market_elapsed:.1f}s")
     
     conn.close()
     
+    # Summary
+    elapsed = (datetime.now() - start_time).total_seconds()
+    log_message("")
     log_message("=" * 80)
     log_message(f"Daily Prediction Job Completed Successfully!")
-    log_message(f"Total Predictions Generated: {total_predictions}")
+    log_message(f"  Total Predictions Generated: {total_predictions}")
+    log_message(f"  Duplicates Skipped:          {total_skipped_dup}")
+    log_message(f"  Stocks Skipped (no data):    {total_skipped_data}")
+    log_message(f"  Errors:                      {errors}")
     if USE_ACTIVE_LEARNING:
-        log_message(f"Active Learning Stats: {models_skipped} poor-performing model runs skipped")
+        log_message(f"  Models Skipped (underperf):  {models_skipped}")
+    log_message(f"  Total Time:                  {elapsed:.1f}s ({elapsed/60:.1f} min)")
     log_message("=" * 80)
 
 if __name__ == "__main__":
@@ -755,6 +763,5 @@ if __name__ == "__main__":
         run_daily_predictions()
     except Exception as e:
         log_message(f"CRITICAL ERROR: {str(e)}", "ERROR")
-        import traceback
         log_message(traceback.format_exc(), "ERROR")
         exit(1)
