@@ -48,7 +48,11 @@ def get_db_connection():
 MARKETS = {
     'NSE 500': {'table': 'nse_500_hist_data', 'symbol_col': 'ticker', 'company_col': 'company'},
     'NASDAQ 100': {'table': 'nasdaq_100_hist_data', 'symbol_col': 'ticker', 'company_col': 'company'},
-    'Forex': {'table': 'forex_hist_data', 'symbol_col': 'symbol', 'company_col': 'symbol'}
+    # Forex removed from Strategy 2 (AI Price Predictor):
+    # - Forex already has a dedicated ML pipeline (sqlserver_copilot_forex) for Strategy 1
+    # - Regression-based price prediction doesn't work well for forex pairs
+    # - Conflicting signals between Strategy 1 and Strategy 2 caused confusion
+    # - Forex should only use Strategy 1 ML classification signals
 }
 
 PREDICTION_DAYS = [1, 3, 7]  # Predict 1, 3, and 7 days ahead
