@@ -48,11 +48,7 @@ def get_db_connection():
 MARKETS = {
     'NSE 500': {'table': 'nse_500_hist_data', 'symbol_col': 'ticker', 'company_col': 'company'},
     'NASDAQ 100': {'table': 'nasdaq_100_hist_data', 'symbol_col': 'ticker', 'company_col': 'company'},
-    # Forex removed from Strategy 2 (AI Price Predictor):
-    # - Forex already has a dedicated ML pipeline (sqlserver_copilot_forex) for Strategy 1
-    # - Regression-based price prediction doesn't work well for forex pairs
-    # - Conflicting signals between Strategy 1 and Strategy 2 caused confusion
-    # - Forex should only use Strategy 1 ML classification signals
+    'Forex': {'table': 'forex_hist_data', 'symbol_col': 'symbol', 'company_col': 'symbol'}
 }
 
 PREDICTION_DAYS = [1, 3, 7]  # Predict 1, 3, and 7 days ahead
@@ -107,17 +103,19 @@ def get_watchlist_stocks(conn, market):
     log_message(f"Loaded {len(df)} stocks from watchlist table for {market}")
     return df
 
-def get_model_performance_history(conn, market, ticker, days_ahead):
+def bulk_load_performance_history(conn, market):
     """
-    Get historical performance for all models for a specific stock and timeframe.
-    Returns dict with model_name as key and performance metrics as value.
+    BULK preload all active learning history for an entire market in ONE query.
+    Returns nested dict: {ticker: {days_ahead: {model_name: metrics}}}.
     
-    This enables ACTIVE LEARNING - the system learns from past prediction accuracy.
+    This replaces 768+ individual queries (256 stocks x 3 timeframes) with 1 query.
     """
     lookback_date = (datetime.now() - timedelta(days=HISTORICAL_LOOKBACK_DAYS)).date()
     
     query = """
     SELECT 
+        ticker,
+        days_ahead,
         model_name,
         COUNT(*) as prediction_count,
         AVG(CAST(direction_correct AS FLOAT)) as direction_accuracy,
@@ -126,22 +124,26 @@ def get_model_performance_history(conn, market, ticker, days_ahead):
         STDEV(percentage_error) as error_volatility
     FROM ai_prediction_history
     WHERE market = ?
-      AND ticker = ?
-      AND days_ahead = ?
       AND prediction_date >= ?
       AND actual_price IS NOT NULL
       AND direction_correct IS NOT NULL
-    GROUP BY model_name
+    GROUP BY ticker, days_ahead, model_name
     HAVING COUNT(*) >= ?
     """
     
     cursor = conn.cursor()
-    cursor.execute(query, (market, ticker, days_ahead, str(lookback_date), MIN_PREDICTIONS_FOR_LEARNING))
+    cursor.execute(query, (market, str(lookback_date), MIN_PREDICTIONS_FOR_LEARNING))
     
-    performance = {}
+    all_history = {}
     for row in cursor.fetchall():
-        model_name, count, direction_acc, avg_error, avg_conf, error_vol = row
-        performance[model_name] = {
+        ticker, days_ahead, model_name, count, direction_acc, avg_error, avg_conf, error_vol = row
+        
+        if ticker not in all_history:
+            all_history[ticker] = {}
+        if days_ahead not in all_history[ticker]:
+            all_history[ticker][days_ahead] = {}
+        
+        all_history[ticker][days_ahead][model_name] = {
             'count': count,
             'direction_accuracy': direction_acc if direction_acc else 0.5,
             'avg_error_pct': avg_error if avg_error else 10.0,
@@ -149,7 +151,11 @@ def get_model_performance_history(conn, market, ticker, days_ahead):
             'error_volatility': error_vol if error_vol else 5.0
         }
     
-    return performance
+    return all_history
+
+def get_performance_from_cache(all_history, ticker, days_ahead):
+    """Look up performance from the bulk-loaded cache. Returns dict or empty dict."""
+    return all_history.get(ticker, {}).get(days_ahead, {})
 
 def select_best_models(performance_history, available_models):
     """
@@ -251,30 +257,45 @@ def get_top_stocks(conn, market, limit=50):
     else:
         return get_top_volume_stocks(conn, market, limit)
 
-def load_stock_data(conn, market, ticker):
-    """Load historical data for a stock"""
+def bulk_load_stock_data(conn, market, tickers):
+    """
+    BULK load historical data for ALL tickers in one market with ONE query.
+    Returns dict: {ticker: DataFrame}.
+    
+    This replaces 256+ individual queries with 1 query.
+    """
     config = MARKETS[market]
     
+    # Build parameterized IN clause
+    placeholders = ','.join(['?' for _ in tickers])
     query = f"""
-    SELECT TOP 1000
-        trading_date,
-        close_price,
-        volume,
-        high_price,
-        low_price
+    SELECT {config['symbol_col']} as ticker, trading_date, close_price, volume, high_price, low_price
     FROM {config['table']}
-    WHERE {config['symbol_col']} = ?
-    ORDER BY trading_date DESC
+    WHERE {config['symbol_col']} IN ({placeholders})
+      AND trading_date >= DATEADD(day, -1100, GETDATE())
+    ORDER BY {config['symbol_col']}, trading_date ASC
     """
     
-    df = pd.read_sql(query, conn, params=[ticker])
+    log_message(f"  Bulk loading data for {len(tickers)} tickers...")
+    load_start = datetime.now()
+    df_all = pd.read_sql(query, conn, params=tickers)
+    load_elapsed = (datetime.now() - load_start).total_seconds()
+    log_message(f"  Loaded {len(df_all):,} rows in {load_elapsed:.1f}s")
     
-    if len(df) < MIN_DATA_POINTS:
-        return None
+    # Split into per-ticker DataFrames
+    stock_data = {}
+    for ticker in tickers:
+        df = df_all[df_all['ticker'] == ticker].copy()
+        df = df.drop(columns=['ticker'])
+        df = df.sort_values('trading_date').reset_index(drop=True)
+        
+        if len(df) >= MIN_DATA_POINTS:
+            # Keep only the most recent 1000 rows (same as original)
+            if len(df) > 1000:
+                df = df.tail(1000).reset_index(drop=True)
+            stock_data[ticker] = df
     
-    # Reverse to chronological order
-    df = df.sort_values('trading_date').reset_index(drop=True)
-    return df
+    return stock_data
 
 def calculate_technical_indicators(df):
     """Calculate technical indicators for ML features"""
@@ -421,7 +442,7 @@ def train_and_predict(df, days_ahead, model_name='XGBoost'):
                 min_samples_leaf=2,
                 max_features='sqrt',
                 random_state=42, 
-                n_jobs=1
+                n_jobs=-1  # Use all CPU cores for parallel tree building
             )
         elif model_name == 'Gradient Boosting':
             model = GradientBoostingRegressor(
@@ -665,23 +686,37 @@ def run_daily_predictions():
         stocks = get_top_stocks(conn, market, MAX_STOCKS_PER_MARKET)
         log_message(f"  Found {len(stocks)} stocks to analyze")
         
+        # OPTIMIZATION: Bulk preload ALL stock data in one query (instead of 256 individual queries)
+        ticker_list = stocks['ticker'].tolist()
+        all_stock_data = bulk_load_stock_data(conn, market, ticker_list)
+        log_message(f"  {len(all_stock_data)} tickers have sufficient data (>= {MIN_DATA_POINTS} rows)")
+        
+        # OPTIMIZATION: Bulk preload ALL active learning history in one query (instead of 768 individual queries)
+        all_performance_history = {}
+        if USE_ACTIVE_LEARNING:
+            perf_start = datetime.now()
+            all_performance_history = bulk_load_performance_history(conn, market)
+            perf_elapsed = (datetime.now() - perf_start).total_seconds()
+            tickers_with_history = len(all_performance_history)
+            log_message(f"  Loaded active learning history for {tickers_with_history} tickers in {perf_elapsed:.1f}s")
+        
         market_predictions = 0
         
         for idx, row in stocks.iterrows():
             ticker = row['ticker']
             company_name = row['company_name']
             
-            log_message(f"  Processing {ticker} ({company_name})...")
-            
-            # Load data (reuse connection)
-            df = load_stock_data(conn, market, ticker)
-            if df is None:
-                log_message(f"    Skipping {ticker}: Insufficient data (< {MIN_DATA_POINTS} records)", "WARNING")
+            # Get data from bulk-loaded cache (no SQL query needed)
+            if ticker not in all_stock_data:
                 total_skipped_data += 1
                 continue
             
+            df_raw = all_stock_data[ticker]
+            
+            log_message(f"  Processing {ticker} ({company_name})...")
+            
             # Calculate indicators
-            df = calculate_technical_indicators(df)
+            df = calculate_technical_indicators(df_raw)
             if len(df) < MIN_DATA_POINTS:
                 log_message(f"    Skipping {ticker}: Insufficient data after indicators ({len(df)} < {MIN_DATA_POINTS})", "WARNING")
                 total_skipped_data += 1
@@ -692,11 +727,11 @@ def run_daily_predictions():
             # Make predictions for each timeframe
             for days_ahead in PREDICTION_DAYS:
                 
-                # ACTIVE LEARNING: Get historical performance for this stock/timeframe
+                # ACTIVE LEARNING: Get from preloaded cache (no SQL query needed)
                 performance_history = {}
                 if USE_ACTIVE_LEARNING:
-                    performance_history = get_model_performance_history(
-                        conn, market, ticker, days_ahead
+                    performance_history = get_performance_from_cache(
+                        all_performance_history, ticker, days_ahead
                     )
                     
                     if performance_history:
@@ -740,6 +775,10 @@ def run_daily_predictions():
             
             if (idx + 1) % 10 == 0:
                 log_message(f"  Processed {idx + 1}/{len(stocks)} stocks...")
+        
+        # Free memory for this market's bulk data
+        del all_stock_data
+        del all_performance_history
         
         # Commit after each market (batch commit)
         conn.commit()
