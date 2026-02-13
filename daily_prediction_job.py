@@ -3,9 +3,19 @@ Daily AI Price Prediction Job (Strategy 2)
 ============================================
 Runs daily to:
 1. Update actual prices for past predictions (backtest)
-2. Generate new predictions for all markets and models
+2. Generate new predictions for all markets using ensemble averaging
 3. Store predictions in ai_prediction_history
 4. Active learning adjusts model selection & confidence
+
+Improvements applied (S2-1 through S2-8):
+- Dropped 1-day predictions (pure noise at 37-41% accuracy)
+- Fixed confidence calibration (removed inflating 1.3x multiplier)
+- Walk-forward validation (expanding window, not single 80/20 split)
+- Time-weighted training (recent data weighted 3.3x more)
+- Market regime detection features (ADX, vol ratio, mean reversion, etc.)
+- 7-day horizon as primary (only horizon above 50% accuracy)
+- Ensemble averaging across all models (not individual model predictions)
+- Minimum 200 samples required (was 50)
 
 Schedule this to run daily via Windows Task Scheduler.
 """
@@ -48,19 +58,23 @@ def get_db_connection():
 MARKETS = {
     'NSE 500': {'table': 'nse_500_hist_data', 'symbol_col': 'ticker', 'company_col': 'company'},
     'NASDAQ 100': {'table': 'nasdaq_100_hist_data', 'symbol_col': 'ticker', 'company_col': 'company'},
-    'Forex': {'table': 'forex_hist_data', 'symbol_col': 'symbol', 'company_col': 'symbol'}
+    # Forex removed: regression-based price prediction doesn't work for FX pairs (35-41% accuracy).
+    # Forex uses Strategy 1 ML classification only (sqlserver_copilot_forex pipeline).
 }
 
-PREDICTION_DAYS = [1, 3, 7]  # Predict 1, 3, and 7 days ahead
+# S2-1: Dropped 1-day predictions (37% accuracy = worse than coin flip)
+# S2-6: 7-day is primary horizon (only one historically above 50%)
+PREDICTION_DAYS = [3, 7]  # 3-day secondary, 7-day primary
 MAX_STOCKS_PER_MARKET = 50  # Not used when USE_WATCHLIST is True
-MIN_DATA_POINTS = 100  # Minimum historical data required
+# S2-8: Raised minimum from 100 to 200 for more reliable training
+MIN_DATA_POINTS = 200  # Minimum historical data required
 
-# Confidence boost for direction-based trading (since direction accuracy is good)
-CONFIDENCE_MULTIPLIER = 1.3  # Boost confidence by 30% for practical usability
+# S2-2: Removed CONFIDENCE_MULTIPLIER (was 1.3x, inflated confidence way above actual accuracy)
+# Confidence now comes directly from walk-forward validation metrics
 
-# Unified confidence bounds (used everywhere)
+# Unified confidence bounds
 CONFIDENCE_MIN = 30
-CONFIDENCE_MAX = 85
+CONFIDENCE_MAX = 80  # Lowered from 85 to be more honest
 
 # =====================================================
 # ACTIVE LEARNING CONFIGURATION
@@ -387,11 +401,79 @@ def calculate_technical_indicators(df):
             trend_strength[i] = 0
     df['trend_strength'] = trend_strength
     
+    # ================================================================
+    # S2-5: Market Regime Detection (same 5 features as Strategy 1)
+    # Helps model recognize trending vs mean-reverting environments
+    # ================================================================
+    
+    # Regime: SMA trend direction (5-day slope of 20-SMA)
+    sma20 = df['close_price'].rolling(window=20).mean()
+    df['regime_sma20_slope'] = sma20.pct_change(5) * 100
+    
+    # Regime: ADX-like trend strength (simplified directional movement)
+    up_move = df['high_price'].diff()
+    down_move = -df['low_price'].diff()
+    pos_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    neg_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    pos_dm_smooth = pd.Series(pos_dm, index=df.index).rolling(14).mean()
+    neg_dm_smooth = pd.Series(neg_dm, index=df.index).rolling(14).mean()
+    dm_sum = pos_dm_smooth + neg_dm_smooth
+    dx = np.where(dm_sum > 0, np.abs(pos_dm_smooth - neg_dm_smooth) / dm_sum * 100, 0)
+    df['regime_adx'] = pd.Series(dx, index=df.index).rolling(14).mean()
+    
+    # Regime: Volatility regime (short-term vol vs long-term vol)
+    vol_short = df['close_price'].pct_change().rolling(10).std()
+    vol_long = df['close_price'].pct_change().rolling(60).std()
+    df['regime_vol_ratio'] = np.where(vol_long > 0, vol_short / vol_long, 1.0)
+    
+    # Regime: Mean reversion (distance from 50-SMA in ATR units)
+    sma50 = df['close_price'].rolling(window=50).mean()
+    atr_14 = df['hl_range'].rolling(window=14).mean() * df['close_price']  # Approximate ATR
+    df['regime_mean_reversion'] = np.where(
+        atr_14 > 0,
+        (df['close_price'] - sma50) / atr_14,
+        0
+    )
+    
+    # Regime: Trend consistency (% of last 20 days moving in overall direction)
+    overall_dir = np.sign(df['close_price'].diff(20))
+    daily_dirs = np.sign(df['close_price'].diff(1))
+    consistent = (daily_dirs == overall_dir).astype(float)
+    df['regime_trend_consistency'] = consistent.rolling(20).mean()
+    
     return df.dropna()
 
-def train_and_predict(df, days_ahead, model_name='XGBoost'):
-    """Train model and make prediction"""
-    # Prepare features -- exclude raw price/volume columns and date
+def _create_model(model_name):
+    """Create a fresh model instance by name."""
+    if model_name == 'XGBoost' and XGBOOST_AVAILABLE:
+        return xgb.XGBRegressor(
+            n_estimators=150, learning_rate=0.05, max_depth=6,
+            min_child_weight=3, subsample=0.8, colsample_bytree=0.8,
+            random_state=42, verbosity=0
+        )
+    elif model_name == 'Random Forest':
+        return RandomForestRegressor(
+            n_estimators=100, max_depth=10, min_samples_split=5,
+            min_samples_leaf=2, max_features='sqrt', random_state=42, n_jobs=-1
+        )
+    elif model_name == 'Gradient Boosting':
+        return GradientBoostingRegressor(
+            n_estimators=100, learning_rate=0.05, max_depth=6,
+            min_samples_split=5, subsample=0.8, random_state=42
+        )
+    else:
+        return LinearRegression()
+
+
+def train_and_predict_ensemble(df, days_ahead, model_names):
+    """
+    S2-7: Ensemble prediction averaging across all models.
+    S2-3: Walk-forward validation (expanding window) for honest confidence.
+    S2-4: Time-weighted training (recent data weighted more).
+    S2-2: Calibrated confidence (no artificial multiplier).
+    
+    Returns: (predicted_change, confidence) or (None, None)
+    """
     feature_cols = [col for col in df.columns if col not in EXCLUDE_FROM_FEATURES]
     
     # Create target (future return)
@@ -399,118 +481,149 @@ def train_and_predict(df, days_ahead, model_name='XGBoost'):
     df_model['target'] = df_model['close_price'].shift(-days_ahead) / df_model['close_price'] - 1
     df_model = df_model.dropna()
     
-    if len(df_model) < 50:
+    # S2-8: Require minimum 200 samples for reliable training
+    if len(df_model) < 200:
         return None, None
     
-    # Train/test split (80% train, 20% validation)
-    train_size = int(len(df_model) * 0.8)
-    train_df = df_model.iloc[:train_size]
-    test_df = df_model.iloc[train_size:]
+    X_all = df_model[feature_cols].values
+    y_all = df_model['target'].values
     
-    X_train = train_df[feature_cols].values
-    y_train = train_df['target'].values
-    X_test = test_df[feature_cols].values
-    y_test = test_df['target'].values
+    # S2-4: Time-weighted sample weights (exponential recency)
+    n_samples = len(y_all)
+    time_positions = np.arange(n_samples) / n_samples  # 0 to ~1
+    decay_rate = 1.2
+    time_weights = np.exp(decay_rate * (time_positions - 1))  # ~0.3 to 1.0
+    time_weights = time_weights / time_weights.mean()  # Normalize to mean=1
     
-    # Scale features
+    # S2-3: Walk-forward validation (3 expanding windows with purge gap)
+    # Instead of a single 80/20 split, test across multiple time periods
+    n_windows = 3
+    purge_gap = max(days_ahead, 5)  # Gap >= prediction horizon to prevent leakage
+    min_train = int(n_samples * 0.4)
+    window_size = max(30, (n_samples - min_train) // (n_windows + 1))
+    
+    all_wf_direction_scores = []
+    
+    for w in range(n_windows):
+        train_end = min_train + w * window_size
+        test_start = train_end + purge_gap
+        test_end = min(test_start + window_size, n_samples)
+        
+        if test_start >= n_samples or test_end <= test_start:
+            continue
+        
+        wf_X_train = X_all[:train_end]
+        wf_y_train = y_all[:train_end]
+        wf_X_test = X_all[test_start:test_end]
+        wf_y_test = y_all[test_start:test_end]
+        wf_weights = time_weights[:train_end]
+        
+        scaler_wf = StandardScaler()
+        wf_X_train_scaled = scaler_wf.fit_transform(wf_X_train)
+        wf_X_test_scaled = scaler_wf.transform(wf_X_test)
+        
+        # Test each model in the walk-forward window
+        for model_name in model_names:
+            try:
+                model = _create_model(model_name)
+                try:
+                    model.fit(wf_X_train_scaled, wf_y_train, sample_weight=wf_weights)
+                except TypeError:
+                    model.fit(wf_X_train_scaled, wf_y_train)
+                
+                wf_preds = model.predict(wf_X_test_scaled)
+                direction_acc = np.mean(np.sign(wf_y_test) == np.sign(wf_preds))
+                all_wf_direction_scores.append(direction_acc)
+            except Exception:
+                pass
+    
+    # S2-2: Confidence from walk-forward direction accuracy (honest, no multiplier)
+    if all_wf_direction_scores:
+        wf_direction_accuracy = np.mean(all_wf_direction_scores) * 100
+    else:
+        wf_direction_accuracy = 50.0
+    
+    # Now train final models on ALL data and ensemble-average predictions
+    # Use 80/20 split for the final training (with time weights)
+    train_end_final = int(n_samples * 0.8)
+    X_train_final = X_all[:train_end_final]
+    y_train_final = y_all[:train_end_final]
+    X_test_final = X_all[train_end_final:]
+    y_test_final = y_all[train_end_final:]
+    weights_final = time_weights[:train_end_final]
+    
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    X_train_scaled = scaler.fit_transform(X_train_final)
+    X_test_scaled = scaler.transform(X_test_final)
     
     # Get latest data for prediction
     latest_features = df[feature_cols].iloc[-1:].values
     latest_features_scaled = scaler.transform(latest_features)
     
-    # Train model
-    try:
-        if model_name == 'XGBoost' and XGBOOST_AVAILABLE:
-            model = xgb.XGBRegressor(
-                n_estimators=150, 
-                learning_rate=0.05, 
-                max_depth=6, 
-                min_child_weight=3,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                random_state=42, 
-                verbosity=0
-            )
-        elif model_name == 'Random Forest':
-            model = RandomForestRegressor(
-                n_estimators=100, 
-                max_depth=10, 
-                min_samples_split=5,
-                min_samples_leaf=2,
-                max_features='sqrt',
-                random_state=42, 
-                n_jobs=-1  # Use all CPU cores for parallel tree building
-            )
-        elif model_name == 'Gradient Boosting':
-            model = GradientBoostingRegressor(
-                n_estimators=100, 
-                learning_rate=0.05, 
-                max_depth=6,
-                min_samples_split=5,
-                subsample=0.8,
-                random_state=42
-            )
-        else:
-            model = LinearRegression()
-        
-        model.fit(X_train_scaled, y_train)
-        predicted_change = model.predict(latest_features_scaled)[0]
-        
-        # Calculate confidence based on validation performance
-        if len(X_test) > 0:
-            y_pred_test = model.predict(X_test_scaled)
+    # S2-7: Ensemble -- train all models, average their predictions
+    ensemble_predictions = []
+    ensemble_test_preds = []
+    
+    for model_name in model_names:
+        try:
+            model = _create_model(model_name)
+            try:
+                model.fit(X_train_scaled, y_train_final, sample_weight=weights_final)
+            except TypeError:
+                model.fit(X_train_scaled, y_train_final)
             
-            # 1. Direction Accuracy (most important for trading)
-            direction_actual = np.sign(y_test)
-            direction_pred = np.sign(y_pred_test)
-            direction_accuracy = np.mean(direction_actual == direction_pred) * 100
+            pred = model.predict(latest_features_scaled)[0]
+            ensemble_predictions.append(pred)
             
-            # 2. Magnitude Accuracy (how close are predictions)
-            mae = np.mean(np.abs(y_test - y_pred_test))
-            mean_abs_return = np.mean(np.abs(y_test))
-            magnitude_accuracy = max(0, (1 - mae / (mean_abs_return + 1e-8)) * 100)
-            
-            # 3. R-squared Score (variance explained)
-            ss_res = np.sum((y_test - y_pred_test) ** 2)
-            ss_tot = np.sum((y_test - np.mean(y_test)) ** 2)
-            r2_score = max(0, 1 - ss_res / (ss_tot + 1e-8))
-            r2_confidence = r2_score * 100
-            
-            # 4. Consistency Score (predictions not too volatile)
-            pred_std = np.std(y_pred_test)
-            actual_std = np.std(y_test)
-            consistency = max(0, 100 - abs(pred_std - actual_std) / (actual_std + 1e-8) * 100)
-            
-            # Weighted formula: 50% direction + 20% magnitude + 15% R-squared + 15% consistency
-            confidence = (
-                0.50 * direction_accuracy + 
-                0.20 * magnitude_accuracy + 
-                0.15 * r2_confidence + 
-                0.15 * consistency
-            )
-            
-            # Adjust confidence based on test set size (more data = more reliable)
-            if len(X_test) < 50:
-                confidence *= 0.8  # Reduce confidence if test set too small
-            elif len(X_test) > 150:
-                confidence *= 1.15  # Boost confidence with large test set
-            
-            # Apply confidence multiplier for practical usability
-            confidence *= CONFIDENCE_MULTIPLIER
-            
-            # Unified bounds
-            confidence = max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, confidence))
-        else:
-            confidence = 50.0  # Default if no test data
-        
-        return predicted_change, confidence
-        
-    except Exception as e:
-        log_message(f"Model training error for {model_name}: {str(e)}", "ERROR")
+            # Also get test predictions for confidence calculation
+            test_pred = model.predict(X_test_scaled)
+            ensemble_test_preds.append(test_pred)
+        except Exception as e:
+            log_message(f"    Model {model_name} failed: {str(e)}", "WARNING")
+    
+    if not ensemble_predictions:
         return None, None
+    
+    # Ensemble average prediction
+    predicted_change = np.mean(ensemble_predictions)
+    
+    # Calculate final confidence from multiple signals
+    if ensemble_test_preds and len(y_test_final) > 0:
+        # Average test predictions across ensemble
+        avg_test_preds = np.mean(ensemble_test_preds, axis=0)
+        
+        # 1. Test set direction accuracy (30% weight)
+        test_direction_acc = np.mean(np.sign(y_test_final) == np.sign(avg_test_preds)) * 100
+        
+        # 2. Walk-forward direction accuracy (50% weight -- most honest measure)
+        # Already calculated above as wf_direction_accuracy
+        
+        # 3. Ensemble agreement (20% weight -- models agree = more confident)
+        pred_signs = [np.sign(p) for p in ensemble_predictions]
+        agreement = np.mean([s == pred_signs[0] for s in pred_signs]) * 100
+        
+        # S2-2: Calibrated confidence formula (no artificial multiplier)
+        confidence = (
+            0.50 * wf_direction_accuracy +  # Walk-forward (honest OOS metric)
+            0.30 * test_direction_acc +       # Test set accuracy
+            0.20 * agreement                  # Ensemble agreement
+        )
+        
+        # Bounds (no multiplier, no inflating)
+        confidence = max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, confidence))
+    else:
+        confidence = CONFIDENCE_MIN
+    
+    return predicted_change, confidence
+
+
+def train_and_predict(df, days_ahead, model_name='XGBoost'):
+    """Legacy single-model interface (used by train_and_predict_with_feedback).
+    Now delegates to ensemble internally but returns result for the specified model name.
+    """
+    # Use ensemble but return result tagged with the given model_name
+    model_names = [model_name]
+    return train_and_predict_ensemble(df, days_ahead, model_names)
 
 def train_and_predict_with_feedback(df, days_ahead, model_name, performance_history):
     """
@@ -601,8 +714,12 @@ def update_actual_prices(conn):
     
     total_updated = 0
     
+    # Include Forex for updating historical predictions (even though we no longer generate new ones)
+    all_markets_for_update = dict(MARKETS)
+    all_markets_for_update['Forex'] = {'table': 'forex_hist_data', 'symbol_col': 'symbol', 'company_col': 'symbol'}
+    
     # Batch update for each market (uses JOIN for performance)
-    for market, config in MARKETS.items():
+    for market, config in all_markets_for_update.items():
         table = config['table']
         symbol_col = config['symbol_col']
         
@@ -724,7 +841,7 @@ def run_daily_predictions():
             
             current_price = df['close_price'].iloc[-1]
             
-            # Make predictions for each timeframe
+            # Make predictions for each timeframe using ENSEMBLE
             for days_ahead in PREDICTION_DAYS:
                 
                 # ACTIVE LEARNING: Get from preloaded cache (no SQL query needed)
@@ -746,32 +863,39 @@ def run_daily_predictions():
                 else:
                     selected_models = all_models
                 
-                # Generate predictions with each selected model
-                for model_name in selected_models:
-                    try:
-                        # ACTIVE LEARNING: Use feedback-enhanced prediction
-                        if USE_ACTIVE_LEARNING:
-                            predicted_change, confidence = train_and_predict_with_feedback(
-                                df, days_ahead, model_name, performance_history
+                # S2-7: Generate ENSEMBLE prediction (average of all selected models)
+                try:
+                    predicted_change, confidence = train_and_predict_ensemble(
+                        df, days_ahead, selected_models
+                    )
+                    
+                    if predicted_change is not None:
+                        # Apply active learning confidence adjustment
+                        if USE_ACTIVE_LEARNING and performance_history:
+                            # Use best-performing model's history for adjustment
+                            best_hist_model = max(
+                                performance_history.items(),
+                                key=lambda x: x[1]['direction_accuracy'],
+                                default=(None, None)
                             )
-                        else:
-                            predicted_change, confidence = train_and_predict(
-                                df, days_ahead, model_name
-                            )
+                            if best_hist_model[0]:
+                                confidence = adjust_confidence_with_history(
+                                    confidence, best_hist_model[0], performance_history
+                                )
                         
-                        if predicted_change is not None:
-                            inserted = store_prediction(
-                                cursor, market, ticker, company_name, days_ahead, model_name,
-                                current_price, predicted_change, confidence
-                            )
-                            if inserted:
-                                total_predictions += 1
-                                market_predictions += 1
-                            else:
-                                total_skipped_dup += 1
-                    except Exception as e:
-                        errors += 1
-                        log_message(f"    Error predicting {ticker}/{model_name}/{days_ahead}d: {str(e)}", "ERROR")
+                        # Store as "Ensemble" model name
+                        inserted = store_prediction(
+                            cursor, market, ticker, company_name, days_ahead, 'Ensemble',
+                            current_price, predicted_change, confidence
+                        )
+                        if inserted:
+                            total_predictions += 1
+                            market_predictions += 1
+                        else:
+                            total_skipped_dup += 1
+                except Exception as e:
+                    errors += 1
+                    log_message(f"    Error predicting {ticker}/Ensemble/{days_ahead}d: {str(e)}", "ERROR")
             
             if (idx + 1) % 10 == 0:
                 log_message(f"  Processed {idx + 1}/{len(stocks)} stocks...")
