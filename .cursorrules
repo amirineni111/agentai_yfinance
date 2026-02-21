@@ -1,0 +1,48 @@
+# Cursor Rules — streamlit-trading-dashboard
+
+## Project
+Streamlit dashboard + SQL view creator + daily signal tracking/AI predictions for stock trading platform.
+
+## Stack
+- Python 3.11+, Streamlit, pandas, plotly, pyodbc, scikit-learn
+- SQL Server (localhost\MSSQLSERVER01, stockdata_db)
+
+## Architecture
+- app.py — 11,658-line monolithic Streamlit app (15 pages)
+- create_views.py — Creates 40+ SQL views for ecosystem
+- ai_predictions.py — Daily 6 PM: LR/GB/RF price predictions
+- signal_tracker.py — Daily 7 PM: Signal outcome tracking
+
+## Critical Views Created
+- vw_PowerBI_AI_Technical_Combos (TIER 1/2 signals — used by agentic AI)
+- vw_strategy2_trade_opportunities (Trade grades A-D — used by agentic AI)
+- Per-market indicator views (RSI, MACD, BB, ATR, Stochastic, Fibonacci, S/R, Patterns)
+- Per-market signal views + crossover aggregates
+- Fundamental screening views
+
+## Tables Written
+- ai_prediction_history, signal_tracking_history, daily_signals_history
+
+## Schedule
+- 6:00 PM daily AI predictions
+- 7:00 PM daily signal tracking
+
+## Known Issues
+- app.py is monolithic (11,658 lines) — decompose into pages/
+- SQL credentials hardcoded — move to .env
+- No automated tests
+
+## Ecosystem
+Views from this repo are consumed by stockdata_agenticai agents, ML pipelines, and sqlserver_mcp.
+- sqlserver_mcp — .NET 8 MCP Server (Microsoft MssqlMcp): 7 tools (ListTables, DescribeTable, ReadData, CreateTable, DropTable, InsertData, UpdateData) via stdio. Use to explore DB schemas/data during development.
+
+## MCP Server Config (for AI IDE DB access)
+```json
+"MSSQL MCP": {
+    "type": "stdio",
+    "command": "C:\\Users\\sreea\\OneDrive\\Desktop\\sqlserver_mcp\\SQL-AI-samples\\MssqlMcp\\dotnet\\MssqlMcp\\bin\\Debug\\net8.0\\MssqlMcp.exe",
+    "env": {
+        "CONNECTION_STRING": "Server=localhost\\MSSQLSERVER01;Database=stockdata_db;Trusted_Connection=True;TrustServerCertificate=True"
+    }
+}
+```

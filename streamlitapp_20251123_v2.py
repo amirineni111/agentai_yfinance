@@ -10,6 +10,11 @@ from datetime import datetime
 import io
 from io import BytesIO
 import base64
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure Streamlit page settings first
 st.set_page_config(
@@ -29,20 +34,43 @@ st.set_page_config(
 @st.cache_resource
 def get_connection_pool():
     """Create a connection pool to manage database connections more efficiently"""
-    # SQL Server Authentication for remote access
-    # Works from any machine on the same network
-    connection_string = (
-        'DRIVER={ODBC Driver 17 for SQL Server};'
-        'SERVER=localhost\\MSSQLSERVER01;'  # Use 192.168.87.27\\MSSQLSERVER01 for remote access
-        'DATABASE=stockdata_db;'
-        'UID=remote_user;'  # SQL Server authentication
-        'PWD=YourStrongPassword123!;'  # SQL Server password
-        'MARS_Connection=yes;'  # Enable Multiple Active Result Sets
-        'Connection Timeout=900;'  # 15 minutes for large queries
-        'Command Timeout=900;'  # 15 minutes for large queries
-        'MultipleActiveResultSets=true;'  # Additional MARS setting
-        'Pooling=true;'  # Enable connection pooling
-    )
+    # Load connection settings from .env (never hardcode credentials)
+    sql_server = os.getenv('SQL_SERVER', 'localhost\\MSSQLSERVER01')
+    sql_database = os.getenv('SQL_DATABASE', 'stockdata_db')
+    sql_driver = os.getenv('SQL_DRIVER', '{ODBC Driver 17 for SQL Server}')
+    sql_trusted = os.getenv('SQL_TRUSTED_CONNECTION', 'yes').lower()
+
+    if sql_trusted == 'yes':
+        # Windows Authentication (same machine or domain)
+        connection_string = (
+            f'DRIVER={sql_driver};'
+            f'SERVER={sql_server};'
+            f'DATABASE={sql_database};'
+            f'Trusted_Connection=yes;'
+            f'TrustServerCertificate=yes;'
+            'MARS_Connection=yes;'
+            'Connection Timeout=900;'
+            'Command Timeout=900;'
+            'MultipleActiveResultSets=true;'
+            'Pooling=true;'
+        )
+    else:
+        # SQL Server Authentication (remote access)
+        sql_username = os.getenv('SQL_USERNAME', '')
+        sql_password = os.getenv('SQL_PASSWORD', '')
+        connection_string = (
+            f'DRIVER={sql_driver};'
+            f'SERVER={sql_server};'
+            f'DATABASE={sql_database};'
+            f'UID={sql_username};'
+            f'PWD={sql_password};'
+            f'TrustServerCertificate=yes;'
+            'MARS_Connection=yes;'
+            'Connection Timeout=900;'
+            'Command Timeout=900;'
+            'MultipleActiveResultSets=true;'
+            'Pooling=true;'
+        )
     return connection_string
 
 def reset_database_connections():
