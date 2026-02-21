@@ -176,9 +176,9 @@ Tracks outcomes of trading signals at 7-day, 14-day, and 30-day horizons.
 ## 6. DATABASE CONTEXT
 
 ### Connection
-- **Server**: `localhost\MSSQLSERVER01`
+- **Server**: `192.168.87.27\MSSQLSERVER01` (Machine A LAN IP)
 - **Database**: `stockdata_db`
-- **Auth**: SQL Auth (credentials in code — known security issue)
+- **Auth**: SQL Auth (`remote_user` via .env — credentials in code for legacy pages is a known security issue)
 
 ### Tables This Repo READS
 All market data + ML prediction tables from the ecosystem.
@@ -221,7 +221,7 @@ The `sqlserver_mcp` repo provides an MCP server for AI IDEs to query `stockdata_
     "type": "stdio",
     "command": "C:\\Users\\sreea\\OneDrive\\Desktop\\sqlserver_mcp\\SQL-AI-samples\\MssqlMcp\\dotnet\\MssqlMcp\\bin\\Debug\\net8.0\\MssqlMcp.exe",
     "env": {
-        "CONNECTION_STRING": "Server=localhost\\MSSQLSERVER01;Database=stockdata_db;Trusted_Connection=True;TrustServerCertificate=True"
+        "CONNECTION_STRING": "Server=192.168.87.27\\MSSQLSERVER01;Database=stockdata_db;User Id=remote_user;Password=YourStrongPassword123!;TrustServerCertificate=True"
     }
 }
 ```
