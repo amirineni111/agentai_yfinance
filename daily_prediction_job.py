@@ -65,7 +65,7 @@ MARKETS = {
 # S2-1: Dropped 1-day predictions (37% accuracy = worse than coin flip)
 # S2-6: 7-day is primary horizon (only one historically above 50%)
 PREDICTION_DAYS = [3, 7]  # 3-day secondary, 7-day primary
-MAX_STOCKS_PER_MARKET = 50  # Not used when USE_WATCHLIST is True
+MAX_STOCKS_PER_MARKET = None  # Set to None to process all tickers
 # S2-8: Raised minimum from 100 to 200 for more reliable training
 MIN_DATA_POINTS = 200  # Minimum historical data required
 
@@ -87,7 +87,7 @@ HISTORICAL_LOOKBACK_DAYS = 90  # Look back 90 days for performance analysis
 # =====================================================
 # WATCHLIST CONFIGURATION
 # =====================================================
-USE_WATCHLIST = True  # Set to True to use watchlist, False for top volume stocks
+USE_WATCHLIST = False  # Set to True to use watchlist, False for all tickers
 
 # Columns to exclude from ML features (raw values that don't generalize across stocks)
 EXCLUDE_FROM_FEATURES = ['trading_date', 'close_price', 'high_price', 'low_price', 'volume', 'target']
@@ -247,11 +247,12 @@ def adjust_confidence_with_history(confidence, model_name, performance_history):
 
 
 def get_top_volume_stocks(conn, market, limit=50):
-    """Get top stocks by trading volume for a market"""
+    """Get top stocks by trading volume for a market (or all tickers if limit is None)."""
     config = MARKETS[market]
     
+    top_clause = f"TOP {limit}" if limit else ""
     query = f"""
-    SELECT TOP {limit}
+    SELECT {top_clause}
         {config['symbol_col']} as ticker,
         {config['company_col']} as company_name,
         AVG(CAST(volume AS FLOAT)) as avg_volume
