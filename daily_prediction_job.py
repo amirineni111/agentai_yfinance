@@ -26,7 +26,10 @@ import pyodbc
 from datetime import datetime, timedelta
 import traceback
 import sys
+import argparse
 import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 warnings.filterwarnings('ignore')
 
 # Force unbuffered output so logs appear immediately in Task Scheduler
@@ -88,6 +91,12 @@ HISTORICAL_LOOKBACK_DAYS = 90  # Look back 90 days for performance analysis
 # WATCHLIST CONFIGURATION
 # =====================================================
 USE_WATCHLIST = False  # Set to True to use watchlist, False for all tickers
+
+# =====================================================
+# PARALLELISM CONFIGURATION
+# =====================================================
+NUM_WORKERS = max(1, multiprocessing.cpu_count() - 1)  # Leave 1 core free for OS
+CHUNK_SIZE = 10  # Number of tickers per parallel work unit
 
 # Columns to exclude from ML features (raw values that don't generalize across stocks)
 EXCLUDE_FROM_FEATURES = ['trading_date', 'close_price', 'high_price', 'low_price', 'volume', 'target']
@@ -244,6 +253,28 @@ def adjust_confidence_with_history(confidence, model_name, performance_history):
     adjusted_confidence = max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, adjusted_confidence))
     
     return adjusted_confidence
+
+
+def get_tickers_with_new_data(conn, market):
+    """
+    OPTIMIZATION #4: Skip tickers with no new trading data since last prediction.
+    Returns set of tickers that have new data since their last prediction date.
+    """
+    config = MARKETS[market]
+    query = f"""
+    SELECT DISTINCT h.{config['symbol_col']} as ticker
+    FROM {config['table']} h
+    LEFT JOIN (
+        SELECT ticker, MAX(prediction_date) as last_pred_date
+        FROM ai_prediction_history
+        WHERE market = ?
+        GROUP BY ticker
+    ) p ON h.{config['symbol_col']} = p.ticker
+    WHERE p.last_pred_date IS NULL
+       OR h.trading_date > p.last_pred_date
+    """
+    df = pd.read_sql(query, conn, params=[market])
+    return set(df['ticker'].tolist())
 
 
 def get_top_volume_stocks(conn, market, limit=50):
@@ -466,12 +497,15 @@ def _create_model(model_name):
         return LinearRegression()
 
 
-def train_and_predict_ensemble(df, days_ahead, model_names):
+def train_and_predict_ensemble(df, days_ahead, model_names, shared_wf_splits=None):
     """
     S2-7: Ensemble prediction averaging across all models.
     S2-3: Walk-forward validation (expanding window) for honest confidence.
     S2-4: Time-weighted training (recent data weighted more).
     S2-2: Calibrated confidence (no artificial multiplier).
+    
+    OPTIMIZATION #5: shared_wf_splits can be pre-computed and reused across horizons
+    to avoid recomputing train/test windows for each days_ahead.
     
     Returns: (predicted_change, confidence) or (None, None)
     """
@@ -497,26 +531,36 @@ def train_and_predict_ensemble(df, days_ahead, model_names):
     time_weights = time_weights / time_weights.mean()  # Normalize to mean=1
     
     # S2-3: Walk-forward validation (3 expanding windows with purge gap)
-    # Instead of a single 80/20 split, test across multiple time periods
-    n_windows = 3
-    purge_gap = max(days_ahead, 5)  # Gap >= prediction horizon to prevent leakage
-    min_train = int(n_samples * 0.4)
-    window_size = max(30, (n_samples - min_train) // (n_windows + 1))
+    # OPTIMIZATION #5: Reuse split indices if pre-computed
+    if shared_wf_splits is None:
+        n_windows = 3
+        purge_gap = max(days_ahead, 5)
+        min_train = int(n_samples * 0.4)
+        window_size = max(30, (n_samples - min_train) // (n_windows + 1))
+        wf_splits = []
+        for w in range(n_windows):
+            train_end = min_train + w * window_size
+            test_start = train_end + purge_gap
+            test_end = min(test_start + window_size, n_samples)
+            if test_start < n_samples and test_end > test_start:
+                wf_splits.append((train_end, test_start, test_end))
+    else:
+        wf_splits = shared_wf_splits
     
     all_wf_direction_scores = []
     
-    for w in range(n_windows):
-        train_end = min_train + w * window_size
-        test_start = train_end + purge_gap
-        test_end = min(test_start + window_size, n_samples)
-        
-        if test_start >= n_samples or test_end <= test_start:
+    for train_end, test_start, test_end in wf_splits:
+        # Clamp to actual data size (may differ per horizon due to target shift)
+        if test_start >= n_samples or train_end >= n_samples:
+            continue
+        actual_test_end = min(test_end, n_samples)
+        if actual_test_end <= test_start:
             continue
         
         wf_X_train = X_all[:train_end]
         wf_y_train = y_all[:train_end]
-        wf_X_test = X_all[test_start:test_end]
-        wf_y_test = y_all[test_start:test_end]
+        wf_X_test = X_all[test_start:actual_test_end]
+        wf_y_test = y_all[test_start:actual_test_end]
         wf_weights = time_weights[:train_end]
         
         scaler_wf = StandardScaler()
@@ -660,6 +704,98 @@ def train_and_predict_with_feedback(df, days_ahead, model_name, performance_hist
         log_message(f"Model training error for {model_name}: {str(e)}", "ERROR")
         return None, None
 
+
+def compute_shared_wf_splits(n_samples, max_days_ahead=7):
+    """
+    OPTIMIZATION #5: Pre-compute walk-forward split indices once per ticker.
+    Uses the max horizon for the purge gap so splits are valid for all horizons.
+    Returns list of (train_end, test_start, test_end) tuples.
+    """
+    n_windows = 3
+    purge_gap = max(max_days_ahead, 5)
+    min_train = int(n_samples * 0.4)
+    window_size = max(30, (n_samples - min_train) // (n_windows + 1))
+    
+    splits = []
+    for w in range(n_windows):
+        train_end = min_train + w * window_size
+        test_start = train_end + purge_gap
+        test_end = min(test_start + window_size, n_samples)
+        if test_start < n_samples and test_end > test_start:
+            splits.append((train_end, test_start, test_end))
+    return splits
+
+
+def process_single_ticker(args):
+    """
+    OPTIMIZATION #2: Worker function for multiprocessing.
+    Processes one ticker and returns results (no DB writes here).
+    
+    Returns list of dicts with prediction results to be batch-inserted by main process.
+    """
+    ticker, company_name, df_raw, market, all_models, performance_history_for_ticker, prediction_days = args
+    
+    results = []
+    
+    try:
+        # OPTIMIZATION #3: Calculate indicators ONCE per ticker (reused across horizons)
+        df = calculate_technical_indicators(df_raw)
+        if len(df) < MIN_DATA_POINTS:
+            return results  # Empty
+        
+        current_price = df['close_price'].iloc[-1]
+        
+        # OPTIMIZATION #5: Pre-compute walk-forward splits ONCE per ticker
+        feature_cols = [col for col in df.columns if col not in EXCLUDE_FROM_FEATURES]
+        # Estimate n_samples (approximate; exact count varies per horizon due to target shift)
+        n_samples_approx = len(df) - max(prediction_days)
+        shared_wf_splits = compute_shared_wf_splits(n_samples_approx, max(prediction_days))
+        
+        for days_ahead in prediction_days:
+            # Active learning: select models
+            perf_hist = performance_history_for_ticker.get(days_ahead, {})
+            
+            if USE_ACTIVE_LEARNING and perf_hist:
+                selected_models = select_best_models(perf_hist, all_models)
+            else:
+                selected_models = all_models
+            
+            try:
+                predicted_change, confidence = train_and_predict_ensemble(
+                    df, days_ahead, selected_models, shared_wf_splits=shared_wf_splits
+                )
+                
+                if predicted_change is not None:
+                    # Apply active learning confidence adjustment
+                    if USE_ACTIVE_LEARNING and perf_hist:
+                        best_hist_model = max(
+                            perf_hist.items(),
+                            key=lambda x: x[1]['direction_accuracy'],
+                            default=(None, None)
+                        )
+                        if best_hist_model[0]:
+                            confidence = adjust_confidence_with_history(
+                                confidence, best_hist_model[0], perf_hist
+                            )
+                    
+                    results.append({
+                        'market': market,
+                        'ticker': ticker,
+                        'company_name': company_name,
+                        'days_ahead': days_ahead,
+                        'model_name': 'Ensemble',
+                        'current_price': float(current_price),
+                        'predicted_change': float(predicted_change),
+                        'confidence': float(confidence),
+                    })
+            except Exception as e:
+                # Log error but don't crash the worker
+                pass
+    except Exception as e:
+        pass  # Worker errors are non-fatal
+    
+    return results
+
 def store_prediction(cursor, market, ticker, company_name, days_ahead, model_name, 
                     current_price, predicted_change, confidence):
     """
@@ -766,12 +902,29 @@ def update_actual_prices(conn):
     conn.commit()
     log_message(f"Total updated: {total_updated} predictions with actual prices")
 
-def run_daily_predictions():
-    """Main function to run daily predictions with ACTIVE LEARNING"""
+def run_daily_predictions(markets_filter=None):
+    """
+    Main function to run daily predictions with ACTIVE LEARNING.
+    
+    Args:
+        markets_filter: list of market names to process, or None for all markets.
+                        Supports CLI: --market "NSE 500" or --market "NASDAQ 100"
+    """
     start_time = datetime.now()
     
+    # Determine which markets to process
+    if markets_filter:
+        markets_to_process = {k: v for k, v in MARKETS.items() if k in markets_filter}
+        if not markets_to_process:
+            log_message(f"ERROR: No valid markets in filter {markets_filter}. Available: {list(MARKETS.keys())}", "ERROR")
+            exit(1)
+    else:
+        markets_to_process = MARKETS
+    
     log_message("=" * 80)
-    log_message("Starting Daily AI Price Prediction Job (Strategy 2)")
+    log_message("Starting Daily AI Price Prediction Job (Strategy 2) -- OPTIMIZED")
+    log_message(f"Markets: {', '.join(markets_to_process.keys())}")
+    log_message(f"Parallel workers: {NUM_WORKERS}")
     if USE_ACTIVE_LEARNING:
         log_message("ACTIVE LEARNING ENABLED - Using historical performance feedback")
     log_message("=" * 80)
@@ -792,11 +945,11 @@ def run_daily_predictions():
     total_predictions = 0
     total_skipped_dup = 0
     total_skipped_data = 0
-    models_skipped = 0
+    total_skipped_unchanged = 0
     errors = 0
     
     # Step 2: Generate predictions for each market
-    for market in MARKETS.keys():
+    for market in markets_to_process.keys():
         log_message(f"\nStep 2: Processing {market}...")
         market_start = datetime.now()
         
@@ -804,12 +957,26 @@ def run_daily_predictions():
         stocks = get_top_stocks(conn, market, MAX_STOCKS_PER_MARKET)
         log_message(f"  Found {len(stocks)} stocks to analyze")
         
-        # OPTIMIZATION: Bulk preload ALL stock data in one query (instead of 256 individual queries)
+        # OPTIMIZATION #4: Skip tickers with no new data since last prediction
+        tickers_with_updates = get_tickers_with_new_data(conn, market)
+        original_count = len(stocks)
+        stocks = stocks[stocks['ticker'].isin(tickers_with_updates)]
+        skipped_unchanged = original_count - len(stocks)
+        total_skipped_unchanged += skipped_unchanged
+        if skipped_unchanged > 0:
+            log_message(f"  Skipped {skipped_unchanged} tickers with no new data (already predicted)")
+        log_message(f"  {len(stocks)} tickers to process after filtering")
+        
+        if len(stocks) == 0:
+            log_message(f"  {market} complete: No tickers need predictions")
+            continue
+        
+        # OPTIMIZATION: Bulk preload ALL stock data in one query
         ticker_list = stocks['ticker'].tolist()
         all_stock_data = bulk_load_stock_data(conn, market, ticker_list)
         log_message(f"  {len(all_stock_data)} tickers have sufficient data (>= {MIN_DATA_POINTS} rows)")
         
-        # OPTIMIZATION: Bulk preload ALL active learning history in one query (instead of 768 individual queries)
+        # OPTIMIZATION: Bulk preload ALL active learning history in one query
         all_performance_history = {}
         if USE_ACTIVE_LEARNING:
             perf_start = datetime.now()
@@ -818,92 +985,81 @@ def run_daily_predictions():
             tickers_with_history = len(all_performance_history)
             log_message(f"  Loaded active learning history for {tickers_with_history} tickers in {perf_elapsed:.1f}s")
         
-        market_predictions = 0
-        
-        for idx, row in stocks.iterrows():
+        # Build worker arguments for multiprocessing
+        worker_args = []
+        for _, row in stocks.iterrows():
             ticker = row['ticker']
             company_name = row['company_name']
             
-            # Get data from bulk-loaded cache (no SQL query needed)
             if ticker not in all_stock_data:
                 total_skipped_data += 1
                 continue
             
             df_raw = all_stock_data[ticker]
+            perf_hist = all_performance_history.get(ticker, {})
             
-            log_message(f"  Processing {ticker} ({company_name})...")
-            
-            # Calculate indicators
-            df = calculate_technical_indicators(df_raw)
-            if len(df) < MIN_DATA_POINTS:
-                log_message(f"    Skipping {ticker}: Insufficient data after indicators ({len(df)} < {MIN_DATA_POINTS})", "WARNING")
-                total_skipped_data += 1
-                continue
-            
-            current_price = df['close_price'].iloc[-1]
-            
-            # Make predictions for each timeframe using ENSEMBLE
-            for days_ahead in PREDICTION_DAYS:
-                
-                # ACTIVE LEARNING: Get from preloaded cache (no SQL query needed)
-                performance_history = {}
-                if USE_ACTIVE_LEARNING:
-                    performance_history = get_performance_from_cache(
-                        all_performance_history, ticker, days_ahead
-                    )
+            worker_args.append((
+                ticker, company_name, df_raw, market,
+                all_models, perf_hist, PREDICTION_DAYS
+            ))
+        
+        log_message(f"  Dispatching {len(worker_args)} tickers to {NUM_WORKERS} parallel workers...")
+        
+        # OPTIMIZATION #2: Process tickers in parallel using multiprocessing
+        market_predictions = 0
+        all_results = []
+        
+        if NUM_WORKERS > 1 and len(worker_args) > 5:
+            with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+                futures = {executor.submit(process_single_ticker, args): args[0] for args in worker_args}
+                completed = 0
+                for future in as_completed(futures):
+                    completed += 1
+                    ticker_name = futures[future]
+                    try:
+                        results = future.result()
+                        all_results.extend(results)
+                    except Exception as e:
+                        errors += 1
+                        log_message(f"    Worker error for {ticker_name}: {str(e)}", "ERROR")
                     
-                    if performance_history:
-                        log_message(f"    [{days_ahead}-day] Historical data: {len(performance_history)} models tracked", "INFO")
-                
-                # ACTIVE LEARNING: Select best models based on historical performance
-                if USE_ACTIVE_LEARNING and performance_history:
-                    selected_models = select_best_models(performance_history, all_models)
-                    if len(selected_models) < len(all_models):
-                        models_skipped += (len(all_models) - len(selected_models))
-                        log_message(f"    [{days_ahead}-day] Using {len(selected_models)}/{len(all_models)} models (skipped underperformers)", "INFO")
-                else:
-                    selected_models = all_models
-                
-                # S2-7: Generate ENSEMBLE prediction (average of all selected models)
+                    if completed % 50 == 0:
+                        log_message(f"  Completed {completed}/{len(worker_args)} tickers...")
+        else:
+            # Sequential fallback for small batches or single worker
+            for i, args in enumerate(worker_args):
                 try:
-                    predicted_change, confidence = train_and_predict_ensemble(
-                        df, days_ahead, selected_models
-                    )
-                    
-                    if predicted_change is not None:
-                        # Apply active learning confidence adjustment
-                        if USE_ACTIVE_LEARNING and performance_history:
-                            # Use best-performing model's history for adjustment
-                            best_hist_model = max(
-                                performance_history.items(),
-                                key=lambda x: x[1]['direction_accuracy'],
-                                default=(None, None)
-                            )
-                            if best_hist_model[0]:
-                                confidence = adjust_confidence_with_history(
-                                    confidence, best_hist_model[0], performance_history
-                                )
-                        
-                        # Store as "Ensemble" model name
-                        inserted = store_prediction(
-                            cursor, market, ticker, company_name, days_ahead, 'Ensemble',
-                            current_price, predicted_change, confidence
-                        )
-                        if inserted:
-                            total_predictions += 1
-                            market_predictions += 1
-                        else:
-                            total_skipped_dup += 1
+                    results = process_single_ticker(args)
+                    all_results.extend(results)
                 except Exception as e:
                     errors += 1
-                    log_message(f"    Error predicting {ticker}/Ensemble/{days_ahead}d: {str(e)}", "ERROR")
-            
-            if (idx + 1) % 10 == 0:
-                log_message(f"  Processed {idx + 1}/{len(stocks)} stocks...")
+                    log_message(f"    Error processing {args[0]}: {str(e)}", "ERROR")
+                
+                if (i + 1) % 50 == 0:
+                    log_message(f"  Processed {i + 1}/{len(worker_args)} tickers...")
+        
+        # Batch-insert all results into DB (main process only — thread-safe)
+        log_message(f"  Inserting {len(all_results)} predictions into database...")
+        for result in all_results:
+            try:
+                inserted = store_prediction(
+                    cursor, result['market'], result['ticker'], result['company_name'],
+                    result['days_ahead'], result['model_name'],
+                    result['current_price'], result['predicted_change'], result['confidence']
+                )
+                if inserted:
+                    total_predictions += 1
+                    market_predictions += 1
+                else:
+                    total_skipped_dup += 1
+            except Exception as e:
+                errors += 1
+                log_message(f"    DB insert error for {result['ticker']}: {str(e)}", "ERROR")
         
         # Free memory for this market's bulk data
         del all_stock_data
         del all_performance_history
+        del all_results
         
         # Commit after each market (batch commit)
         conn.commit()
@@ -920,15 +1076,30 @@ def run_daily_predictions():
     log_message(f"  Total Predictions Generated: {total_predictions}")
     log_message(f"  Duplicates Skipped:          {total_skipped_dup}")
     log_message(f"  Stocks Skipped (no data):    {total_skipped_data}")
+    log_message(f"  Stocks Skipped (unchanged):  {total_skipped_unchanged}")
     log_message(f"  Errors:                      {errors}")
-    if USE_ACTIVE_LEARNING:
-        log_message(f"  Models Skipped (underperf):  {models_skipped}")
+    log_message(f"  Parallel Workers Used:       {NUM_WORKERS}")
     log_message(f"  Total Time:                  {elapsed:.1f}s ({elapsed/60:.1f} min)")
     log_message("=" * 80)
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Daily AI Price Prediction Job (Strategy 2)")
+    parser.add_argument(
+        '--market', type=str, nargs='+',
+        help='Market(s) to process. E.g.: --market "NSE 500" or --market "NASDAQ 100" or both. Default: all markets.',
+        default=None
+    )
+    parser.add_argument(
+        '--workers', type=int, default=None,
+        help=f'Number of parallel workers (default: {NUM_WORKERS} = cpu_count - 1)'
+    )
+    args = parser.parse_args()
+    
+    if args.workers:
+        NUM_WORKERS = args.workers
+    
     try:
-        run_daily_predictions()
+        run_daily_predictions(markets_filter=args.market)
     except Exception as e:
         log_message(f"CRITICAL ERROR: {str(e)}", "ERROR")
         log_message(traceback.format_exc(), "ERROR")
