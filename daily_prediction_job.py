@@ -61,8 +61,7 @@ def get_db_connection():
 MARKETS = {
     'NSE 500': {'table': 'nse_500_hist_data', 'symbol_col': 'ticker', 'company_col': 'company'},
     'NASDAQ 100': {'table': 'nasdaq_100_hist_data', 'symbol_col': 'ticker', 'company_col': 'company'},
-    # Forex removed: regression-based price prediction doesn't work for FX pairs (35-41% accuracy).
-    # Forex uses Strategy 1 ML classification only (sqlserver_copilot_forex pipeline).
+    'Forex': {'table': 'forex_hist_data', 'symbol_col': 'symbol', 'company_col': 'symbol'},
 }
 
 # S2-1: Dropped 1-day predictions (37% accuracy = worse than coin flip)
