@@ -1,21 +1,23 @@
 """
-Daily AI Price Prediction Job (Strategy 2)
-============================================
+Daily AI Direction Prediction Job (v3 — Classification)
+========================================================
 Runs daily to:
 1. Update actual prices for past predictions (backtest)
-2. Generate new predictions for all markets using ensemble averaging
+2. Generate new direction predictions (UP/DOWN) per market
 3. Store predictions in ai_prediction_history
-4. Active learning adjusts model selection & confidence
+4. Active learning adjusts confidence based on historical accuracy
 
-Improvements applied (S2-1 through S2-8):
-- Dropped 1-day predictions (pure noise at 37-41% accuracy)
-- Fixed confidence calibration (removed inflating 1.3x multiplier)
-- Walk-forward validation (expanding window, not single 80/20 split)
-- Time-weighted training (recent data weighted 3.3x more)
-- Market regime detection features (ADX, vol ratio, mean reversion, etc.)
-- 7-day horizon as primary (only horizon above 50% accuracy)
-- Ensemble averaging across all models (not individual model predictions)
-- Minimum 200 samples required (was 50)
+v3 Changes (Classification Rewrite):
+- Switched from REGRESSION to CLASSIFICATION (predict direction, not price)
+- LightGBM Classifier + Logistic Regression ensemble (diverse model types)
+- Reduced features from 48 to 15 (eliminated redundant/correlated indicators)
+- Per-MARKET training (pools all tickers) instead of per-ticker (massively faster)
+- Both 3-day and 7-day horizons retained
+- Magnitude estimated from recent median absolute returns
+
+Differentiation from sibling repos (sqlserver_copilot / sqlserver_copilot_nse):
+- Those repos: 5-day horizon, GradientBoosting+RF+ExtraTrees+LogReg VotingClassifier
+- This repo: 3-day + 7-day horizons, LightGBM + LogReg, 15 trimmed features
 
 Schedule this to run daily via Windows Task Scheduler.
 """
@@ -28,8 +30,6 @@ import traceback
 import sys
 import argparse
 import warnings
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing
 warnings.filterwarnings('ignore')
 
 # Force unbuffered output so logs appear immediately in Task Scheduler
@@ -37,14 +37,8 @@ sys.stdout.reconfigure(line_buffering=True)
 
 # Import ML libraries
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.linear_model import LinearRegression
-
-try:
-    import xgboost as xgb
-    XGBOOST_AVAILABLE = True
-except ImportError:
-    XGBOOST_AVAILABLE = False
+from sklearn.linear_model import LogisticRegression
+import lightgbm as lgb
 
 # Database connection
 def get_db_connection():
@@ -66,17 +60,14 @@ MARKETS = {
 
 # S2-1: Dropped 1-day predictions (37% accuracy = worse than coin flip)
 # S2-6: 7-day is primary horizon (only one historically above 50%)
-PREDICTION_DAYS = [3, 7]  # 3-day secondary, 7-day primary
+PREDICTION_DAYS = [3, 7]  # Both horizons: 3-day and 7-day
 MAX_STOCKS_PER_MARKET = None  # Set to None to process all tickers
-# S2-8: Raised minimum from 100 to 200 for more reliable training
-MIN_DATA_POINTS = 200  # Minimum historical data required
+MIN_DATA_POINTS = 200  # Minimum historical data per ticker
+MIN_MARKET_SAMPLES = 5000  # Minimum pooled samples for per-market training
 
-# S2-2: Removed CONFIDENCE_MULTIPLIER (was 1.3x, inflated confidence way above actual accuracy)
-# Confidence now comes directly from walk-forward validation metrics
-
-# Unified confidence bounds
+# Confidence bounds
 CONFIDENCE_MIN = 30
-CONFIDENCE_MAX = 80  # Lowered from 85 to be more honest
+CONFIDENCE_MAX = 80
 
 # =====================================================
 # ACTIVE LEARNING CONFIGURATION
@@ -91,14 +82,29 @@ HISTORICAL_LOOKBACK_DAYS = 90  # Look back 90 days for performance analysis
 # =====================================================
 USE_WATCHLIST = False  # Set to True to use watchlist, False for all tickers
 
-# =====================================================
-# PARALLELISM CONFIGURATION
-# =====================================================
-NUM_WORKERS = max(1, multiprocessing.cpu_count() - 1)  # Leave 1 core free for OS
-CHUNK_SIZE = 10  # Number of tickers per parallel work unit
+# Columns to exclude from ML features (raw values that don't generalize)
+EXCLUDE_FROM_FEATURES = ['trading_date', 'close_price', 'high_price', 'low_price', 'volume', 'target', 'ticker']
 
-# Columns to exclude from ML features (raw values that don't generalize across stocks)
-EXCLUDE_FROM_FEATURES = ['trading_date', 'close_price', 'high_price', 'low_price', 'volume', 'target']
+# 15 SELECTED FEATURES (trimmed from 48+ to eliminate redundancy)
+# Dropped: sma_5/10/50, ema_5/20/50, log_returns, macd, macd_signal,
+#          momentum_5, bb_width, hl_range_ma, price_position, regime_sma20_slope, regime_adx
+SELECTED_FEATURES = [
+    'returns',                  # Direct price momentum
+    'rsi',                      # Proven mean-reversion signal
+    'macd_histogram',           # Trend momentum change
+    'bb_position',              # Mean reversion + volatility
+    'volume_ratio',             # Confirms moves
+    'momentum_10',              # Medium-term trend
+    'volatility_20',            # Risk regime
+    'regime_vol_ratio',         # Volatility regime shift
+    'regime_trend_consistency', # Trend strength
+    'sma_20_ratio',             # Price vs medium-term trend
+    'ema_10_ratio',             # Short-term trend
+    'hl_range',                 # Intraday volatility
+    'rsi_change',               # Momentum acceleration
+    'regime_mean_reversion',    # Distance from equilibrium
+    'trend_strength',           # Overall trend magnitude
+]
 
 def log_message(message, level="INFO"):
     """Print timestamped log message"""
@@ -174,47 +180,6 @@ def bulk_load_performance_history(conn, market):
         }
     
     return all_history
-
-def get_performance_from_cache(all_history, ticker, days_ahead):
-    """Look up performance from the bulk-loaded cache. Returns dict or empty dict."""
-    return all_history.get(ticker, {}).get(days_ahead, {})
-
-def select_best_models(performance_history, available_models):
-    """
-    Select which models to use based on historical performance.
-    
-    ACTIVE LEARNING: Skip poorly performing models, prioritize successful ones.
-    """
-    if not performance_history:
-        # No history - use all models
-        return available_models
-    
-    selected_models = []
-    
-    for model in available_models:
-        if model in performance_history:
-            perf = performance_history[model]
-            direction_acc = perf['direction_accuracy']
-            
-            # Skip models with poor direction accuracy
-            if direction_acc < MIN_DIRECTION_ACCURACY:
-                log_message(f"    Skipping {model} (direction accuracy: {direction_acc:.1%} < {MIN_DIRECTION_ACCURACY:.1%})", "INFO")
-                continue
-        
-        selected_models.append(model)
-    
-    # If all models were filtered out, use the best one from history
-    if not selected_models and performance_history:
-        best_model = max(performance_history.items(), 
-                        key=lambda x: x[1]['direction_accuracy'])
-        selected_models = [best_model[0]]
-        log_message(f"    All models below threshold, using best: {best_model[0]} ({best_model[1]['direction_accuracy']:.1%})", "INFO")
-    
-    # If still no models, use all available
-    if not selected_models:
-        selected_models = available_models
-    
-    return selected_models
 
 def adjust_confidence_with_history(confidence, model_name, performance_history):
     """
@@ -343,84 +308,70 @@ def bulk_load_stock_data(conn, market, tickers):
     return stock_data
 
 def calculate_technical_indicators(df):
-    """Calculate technical indicators for ML features"""
+    """Calculate the 15 selected technical indicators for ML features.
+    
+    Trimmed from 48+ features to eliminate redundant/correlated indicators.
+    All features are normalized (ratios, percentages) for cross-stock comparability.
+    """
     df = df.copy()
     
-    # Convert price columns to numeric (they're stored as strings in database)
+    # Convert price columns to numeric
     df['close_price'] = pd.to_numeric(df['close_price'], errors='coerce')
     df['high_price'] = pd.to_numeric(df['high_price'], errors='coerce')
     df['low_price'] = pd.to_numeric(df['low_price'], errors='coerce')
     df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
-    
-    # Drop any rows with NaN values after conversion
     df = df.dropna()
     
-    # Price-based features
+    # 1. returns — daily % change
     df['returns'] = df['close_price'].pct_change()
-    df['log_returns'] = np.log(df['close_price'] / df['close_price'].shift(1))
     
-    # Moving averages (as ratios to close price for cross-stock comparability)
-    for period in [5, 10, 20, 50]:
-        df[f'sma_{period}'] = df['close_price'].rolling(window=period).mean()
-        df[f'sma_{period}_ratio'] = df['close_price'] / df[f'sma_{period}']
-        df[f'ema_{period}'] = df['close_price'].ewm(span=period, adjust=False).mean()
-        df[f'ema_{period}_ratio'] = df['close_price'] / df[f'ema_{period}']
-        # Drop raw SMA/EMA (keep only ratios which are scale-independent)
-        df.drop(columns=[f'sma_{period}', f'ema_{period}'], inplace=True)
-    
-    # Volatility
-    df['volatility_20'] = df['returns'].rolling(window=20).std()
-    
-    # RSI
+    # 2. RSI (14-period)
     delta = df['close_price'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # MACD (as percentage of price for cross-stock comparability)
+    # 3. rsi_change — RSI momentum
+    df['rsi_change'] = df['rsi'].diff()
+    
+    # 4. MACD histogram (as % of price)
     ema12 = df['close_price'].ewm(span=12, adjust=False).mean()
     ema26 = df['close_price'].ewm(span=26, adjust=False).mean()
-    df['macd'] = (ema12 - ema26) / df['close_price'] * 100
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    macd_line = (ema12 - ema26) / df['close_price'] * 100
+    macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+    df['macd_histogram'] = macd_line - macd_signal
     
-    # Bollinger Bands (as positions, not absolute values)
+    # 5. Bollinger Band position (0 = at lower band, 1 = at upper band)
     bb_middle = df['close_price'].rolling(window=20).mean()
     bb_std = df['close_price'].rolling(window=20).std()
     bb_upper = bb_middle + (bb_std * 2)
     bb_lower = bb_middle - (bb_std * 2)
-    
-    # Volume features (handle forex with zero volume)
-    volume_sma_20 = df['volume'].rolling(window=20).mean()
-    df['volume_ratio'] = df['volume'] / volume_sma_20.replace(0, 1)
-    df['volume_ratio'] = df['volume_ratio'].fillna(1.0)
-    # Cap extreme volume ratios
-    df['volume_ratio'] = df['volume_ratio'].clip(upper=10.0)
-    
-    # Price momentum
-    df['momentum_5'] = df['close_price'] / df['close_price'].shift(5) - 1
-    df['momentum_10'] = df['close_price'] / df['close_price'].shift(10) - 1
-    
-    # High-Low Range (volatility indicator)
-    df['hl_range'] = (df['high_price'] - df['low_price']) / df['close_price']
-    df['hl_range_ma'] = df['hl_range'].rolling(window=10).mean()
-    
-    # Price position within range
-    df['price_position'] = (df['close_price'] - df['low_price']) / (df['high_price'] - df['low_price'] + 1e-8)
-    
-    # Bollinger Band position (0 = at lower band, 1 = at upper band)
     df['bb_position'] = (df['close_price'] - bb_lower) / (bb_upper - bb_lower + 1e-8)
     
-    # BB width (normalized volatility measure)
-    df['bb_width'] = (bb_upper - bb_lower) / bb_middle
+    # 6. volume_ratio (current vol / 20-SMA, capped)
+    volume_sma_20 = df['volume'].rolling(window=20).mean()
+    df['volume_ratio'] = df['volume'] / volume_sma_20.replace(0, 1)
+    df['volume_ratio'] = df['volume_ratio'].fillna(1.0).clip(upper=10.0)
     
-    # RSI momentum
-    df['rsi_change'] = df['rsi'].diff()
+    # 7. momentum_10 — 10-period price momentum
+    df['momentum_10'] = df['close_price'] / df['close_price'].shift(10) - 1
     
-    # MACD histogram
-    df['macd_histogram'] = df['macd'] - df['macd_signal']
+    # 8. volatility_20 — 20-period rolling std of returns
+    df['volatility_20'] = df['returns'].rolling(window=20).std()
     
-    # Trend strength (ADX-like indicator) -- optimized with raw=True
+    # 9. sma_20_ratio — price vs 20-period SMA
+    sma20 = df['close_price'].rolling(window=20).mean()
+    df['sma_20_ratio'] = df['close_price'] / sma20
+    
+    # 10. ema_10_ratio — price vs 10-period EMA
+    ema10 = df['close_price'].ewm(span=10, adjust=False).mean()
+    df['ema_10_ratio'] = df['close_price'] / ema10
+    
+    # 11. hl_range — intraday volatility (normalized)
+    df['hl_range'] = (df['high_price'] - df['low_price']) / df['close_price']
+    
+    # 12. trend_strength — ADX-like indicator
     close_values = df['close_price'].values
     trend_strength = np.full(len(close_values), np.nan)
     for i in range(13, len(close_values)):
@@ -432,41 +383,17 @@ def calculate_technical_indicators(df):
             trend_strength[i] = 0
     df['trend_strength'] = trend_strength
     
-    # ================================================================
-    # S2-5: Market Regime Detection (same 5 features as Strategy 1)
-    # Helps model recognize trending vs mean-reverting environments
-    # ================================================================
-    
-    # Regime: SMA trend direction (5-day slope of 20-SMA)
-    sma20 = df['close_price'].rolling(window=20).mean()
-    df['regime_sma20_slope'] = sma20.pct_change(5) * 100
-    
-    # Regime: ADX-like trend strength (simplified directional movement)
-    up_move = df['high_price'].diff()
-    down_move = -df['low_price'].diff()
-    pos_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    neg_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    pos_dm_smooth = pd.Series(pos_dm, index=df.index).rolling(14).mean()
-    neg_dm_smooth = pd.Series(neg_dm, index=df.index).rolling(14).mean()
-    dm_sum = pos_dm_smooth + neg_dm_smooth
-    dx = np.where(dm_sum > 0, np.abs(pos_dm_smooth - neg_dm_smooth) / dm_sum * 100, 0)
-    df['regime_adx'] = pd.Series(dx, index=df.index).rolling(14).mean()
-    
-    # Regime: Volatility regime (short-term vol vs long-term vol)
+    # 13. regime_vol_ratio — short-term vol vs long-term vol
     vol_short = df['close_price'].pct_change().rolling(10).std()
     vol_long = df['close_price'].pct_change().rolling(60).std()
     df['regime_vol_ratio'] = np.where(vol_long > 0, vol_short / vol_long, 1.0)
     
-    # Regime: Mean reversion (distance from 50-SMA in ATR units)
+    # 14. regime_mean_reversion — distance from 50-SMA in ATR units
     sma50 = df['close_price'].rolling(window=50).mean()
-    atr_14 = df['hl_range'].rolling(window=14).mean() * df['close_price']  # Approximate ATR
-    df['regime_mean_reversion'] = np.where(
-        atr_14 > 0,
-        (df['close_price'] - sma50) / atr_14,
-        0
-    )
+    atr_14 = df['hl_range'].rolling(window=14).mean() * df['close_price']
+    df['regime_mean_reversion'] = np.where(atr_14 > 0, (df['close_price'] - sma50) / atr_14, 0)
     
-    # Regime: Trend consistency (% of last 20 days moving in overall direction)
+    # 15. regime_trend_consistency — % of last 20 days moving in overall direction
     overall_dir = np.sign(df['close_price'].diff(20))
     daily_dirs = np.sign(df['close_price'].diff(1))
     consistent = (daily_dirs == overall_dir).astype(float)
@@ -474,326 +401,202 @@ def calculate_technical_indicators(df):
     
     return df.dropna()
 
-def _create_model(model_name):
-    """Create a fresh model instance by name."""
-    if model_name == 'XGBoost' and XGBOOST_AVAILABLE:
-        return xgb.XGBRegressor(
-            n_estimators=150, learning_rate=0.05, max_depth=6,
-            min_child_weight=3, subsample=0.8, colsample_bytree=0.8,
-            random_state=42, verbosity=0
-        )
-    elif model_name == 'Random Forest':
-        return RandomForestRegressor(
-            n_estimators=100, max_depth=10, min_samples_split=5,
-            min_samples_leaf=2, max_features='sqrt', random_state=42, n_jobs=-1
-        )
-    elif model_name == 'Gradient Boosting':
-        return GradientBoostingRegressor(
-            n_estimators=100, learning_rate=0.05, max_depth=6,
-            min_samples_split=5, subsample=0.8, random_state=42
-        )
-    else:
-        return LinearRegression()
-
-
-def train_and_predict_ensemble(df, days_ahead, model_names, shared_wf_splits=None):
+def train_market_model(market_df, days_ahead):
     """
-    S2-7: Ensemble prediction averaging across all models.
-    S2-3: Walk-forward validation (expanding window) for honest confidence.
-    S2-4: Time-weighted training (recent data weighted more).
-    S2-2: Calibrated confidence (no artificial multiplier).
+    Train a CLASSIFICATION model on the entire market's pooled data.
     
-    OPTIMIZATION #5: shared_wf_splits can be pre-computed and reused across horizons
-    to avoid recomputing train/test windows for each days_ahead.
+    Uses LightGBM + Logistic Regression ensemble.
+    Target: 1 = price goes UP in N days, 0 = price goes DOWN.
     
-    Returns: (predicted_change, confidence) or (None, None)
+    Returns: (lgb_model, lr_model, scaler, wf_accuracy) or (None, None, None, None)
     """
-    feature_cols = [col for col in df.columns if col not in EXCLUDE_FROM_FEATURES]
+    df = market_df.copy()
     
-    # Create target (future return)
-    df_model = df.copy()
-    df_model['target'] = df_model['close_price'].shift(-days_ahead) / df_model['close_price'] - 1
-    df_model = df_model.dropna()
+    # Classification target: 1 if price goes up in N days, 0 otherwise
+    df['target'] = (df['close_price'].shift(-days_ahead) > df['close_price']).astype(int)
+    df = df.dropna(subset=['target'])
     
-    # S2-8: Require minimum 200 samples for reliable training
-    if len(df_model) < 200:
-        return None, None
+    if len(df) < MIN_MARKET_SAMPLES:
+        log_message(f"    Insufficient pooled data ({len(df)} < {MIN_MARKET_SAMPLES}), skipping", "WARNING")
+        return None, None, None, None
     
-    X_all = df_model[feature_cols].values
-    y_all = df_model['target'].values
+    # Use only the selected 15 features
+    feature_cols = [f for f in SELECTED_FEATURES if f in df.columns]
+    if len(feature_cols) < 10:
+        log_message(f"    Only {len(feature_cols)} features available, skipping", "WARNING")
+        return None, None, None, None
     
-    # S2-4: Time-weighted sample weights (exponential recency)
+    X_all = df[feature_cols].values
+    y_all = df['target'].values
+    
+    # Time-weighted sample weights (exponential recency)
     n_samples = len(y_all)
-    time_positions = np.arange(n_samples) / n_samples  # 0 to ~1
+    time_positions = np.arange(n_samples) / n_samples
     decay_rate = 1.2
-    time_weights = np.exp(decay_rate * (time_positions - 1))  # ~0.3 to 1.0
-    time_weights = time_weights / time_weights.mean()  # Normalize to mean=1
+    time_weights = np.exp(decay_rate * (time_positions - 1))
+    time_weights = time_weights / time_weights.mean()
     
-    # S2-3: Walk-forward validation (3 expanding windows with purge gap)
-    # OPTIMIZATION #5: Reuse split indices if pre-computed
-    if shared_wf_splits is None:
-        n_windows = 3
-        purge_gap = max(days_ahead, 5)
-        min_train = int(n_samples * 0.4)
-        window_size = max(30, (n_samples - min_train) // (n_windows + 1))
-        wf_splits = []
-        for w in range(n_windows):
-            train_end = min_train + w * window_size
-            test_start = train_end + purge_gap
-            test_end = min(test_start + window_size, n_samples)
-            if test_start < n_samples and test_end > test_start:
-                wf_splits.append((train_end, test_start, test_end))
-    else:
-        wf_splits = shared_wf_splits
+    # Walk-forward validation (2 expanding windows) for honest OOS accuracy
+    n_windows = 2
+    purge_gap = max(days_ahead + 3, 8)
+    min_train = int(n_samples * 0.5)
+    window_size = max(100, (n_samples - min_train) // (n_windows + 1))
     
-    all_wf_direction_scores = []
-    
-    for train_end, test_start, test_end in wf_splits:
-        # Clamp to actual data size (may differ per horizon due to target shift)
-        if test_start >= n_samples or train_end >= n_samples:
-            continue
-        actual_test_end = min(test_end, n_samples)
-        if actual_test_end <= test_start:
-            continue
-        
-        wf_X_train = X_all[:train_end]
-        wf_y_train = y_all[:train_end]
-        wf_X_test = X_all[test_start:actual_test_end]
-        wf_y_test = y_all[test_start:actual_test_end]
-        wf_weights = time_weights[:train_end]
-        
-        scaler_wf = StandardScaler()
-        wf_X_train_scaled = scaler_wf.fit_transform(wf_X_train)
-        wf_X_test_scaled = scaler_wf.transform(wf_X_test)
-        
-        # Test each model in the walk-forward window
-        for model_name in model_names:
-            try:
-                model = _create_model(model_name)
-                try:
-                    model.fit(wf_X_train_scaled, wf_y_train, sample_weight=wf_weights)
-                except TypeError:
-                    model.fit(wf_X_train_scaled, wf_y_train)
-                
-                wf_preds = model.predict(wf_X_test_scaled)
-                direction_acc = np.mean(np.sign(wf_y_test) == np.sign(wf_preds))
-                all_wf_direction_scores.append(direction_acc)
-            except Exception:
-                pass
-    
-    # S2-2: Confidence from walk-forward direction accuracy (honest, no multiplier)
-    if all_wf_direction_scores:
-        wf_direction_accuracy = np.mean(all_wf_direction_scores) * 100
-    else:
-        wf_direction_accuracy = 50.0
-    
-    # Now train final models on ALL data and ensemble-average predictions
-    # Use 80/20 split for the final training (with time weights)
-    train_end_final = int(n_samples * 0.8)
-    X_train_final = X_all[:train_end_final]
-    y_train_final = y_all[:train_end_final]
-    X_test_final = X_all[train_end_final:]
-    y_test_final = y_all[train_end_final:]
-    weights_final = time_weights[:train_end_final]
-    
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train_final)
-    X_test_scaled = scaler.transform(X_test_final)
-    
-    # Get latest data for prediction
-    latest_features = df[feature_cols].iloc[-1:].values
-    latest_features_scaled = scaler.transform(latest_features)
-    
-    # S2-7: Ensemble -- train all models, average their predictions
-    ensemble_predictions = []
-    ensemble_test_preds = []
-    
-    for model_name in model_names:
-        try:
-            model = _create_model(model_name)
-            try:
-                model.fit(X_train_scaled, y_train_final, sample_weight=weights_final)
-            except TypeError:
-                model.fit(X_train_scaled, y_train_final)
-            
-            pred = model.predict(latest_features_scaled)[0]
-            ensemble_predictions.append(pred)
-            
-            # Also get test predictions for confidence calculation
-            test_pred = model.predict(X_test_scaled)
-            ensemble_test_preds.append(test_pred)
-        except Exception as e:
-            log_message(f"    Model {model_name} failed: {str(e)}", "WARNING")
-    
-    if not ensemble_predictions:
-        return None, None
-    
-    # Ensemble average prediction
-    predicted_change = np.mean(ensemble_predictions)
-    
-    # Calculate final confidence from multiple signals
-    if ensemble_test_preds and len(y_test_final) > 0:
-        # Average test predictions across ensemble
-        avg_test_preds = np.mean(ensemble_test_preds, axis=0)
-        
-        # 1. Test set direction accuracy (30% weight)
-        test_direction_acc = np.mean(np.sign(y_test_final) == np.sign(avg_test_preds)) * 100
-        
-        # 2. Walk-forward direction accuracy (50% weight -- most honest measure)
-        # Already calculated above as wf_direction_accuracy
-        
-        # 3. Ensemble agreement (20% weight -- models agree = more confident)
-        pred_signs = [np.sign(p) for p in ensemble_predictions]
-        agreement = np.mean([s == pred_signs[0] for s in pred_signs]) * 100
-        
-        # S2-2: Calibrated confidence formula (no artificial multiplier)
-        confidence = (
-            0.50 * wf_direction_accuracy +  # Walk-forward (honest OOS metric)
-            0.30 * test_direction_acc +       # Test set accuracy
-            0.20 * agreement                  # Ensemble agreement
-        )
-        
-        # Bounds (no multiplier, no inflating)
-        confidence = max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, confidence))
-    else:
-        confidence = CONFIDENCE_MIN
-    
-    return predicted_change, confidence
-
-
-def train_and_predict(df, days_ahead, model_name='XGBoost'):
-    """Legacy single-model interface (used by train_and_predict_with_feedback).
-    Now delegates to ensemble internally but returns result for the specified model name.
-    """
-    # Use ensemble but return result tagged with the given model_name
-    model_names = [model_name]
-    return train_and_predict_ensemble(df, days_ahead, model_names)
-
-def train_and_predict_with_feedback(df, days_ahead, model_name, performance_history):
-    """
-    Enhanced prediction function with ACTIVE LEARNING.
-    Uses historical performance to adjust confidence scores.
-    """
-    try:
-        # Train model normally
-        predicted_change, base_confidence = train_and_predict(df, days_ahead, model_name)
-        
-        if predicted_change is None or base_confidence is None:
-            return None, None
-        
-        # ACTIVE LEARNING: Adjust confidence based on historical model performance
-        if USE_ACTIVE_LEARNING and performance_history:
-            adjusted_confidence = adjust_confidence_with_history(
-                base_confidence, model_name, performance_history
-            )
-            
-            # Log adjustment if significant
-            if abs(adjusted_confidence - base_confidence) > 3:
-                log_message(
-                    f"      {model_name}: Confidence adjusted {base_confidence:.1f}% -> {adjusted_confidence:.1f}% "
-                    f"(historical accuracy: {performance_history.get(model_name, {}).get('direction_accuracy', 0.5):.1%})",
-                    "INFO"
-                )
-            
-            return predicted_change, adjusted_confidence
-        else:
-            return predicted_change, base_confidence
-            
-    except Exception as e:
-        log_message(f"Model training error for {model_name}: {str(e)}", "ERROR")
-        return None, None
-
-
-def compute_shared_wf_splits(n_samples, max_days_ahead=7):
-    """
-    OPTIMIZATION #5: Pre-compute walk-forward split indices once per ticker.
-    Uses the max horizon for the purge gap so splits are valid for all horizons.
-    Returns list of (train_end, test_start, test_end) tuples.
-    """
-    n_windows = 3
-    purge_gap = max(max_days_ahead, 5)
-    min_train = int(n_samples * 0.4)
-    window_size = max(30, (n_samples - min_train) // (n_windows + 1))
-    
-    splits = []
+    wf_direction_scores = []
     for w in range(n_windows):
         train_end = min_train + w * window_size
         test_start = train_end + purge_gap
         test_end = min(test_start + window_size, n_samples)
-        if test_start < n_samples and test_end > test_start:
-            splits.append((train_end, test_start, test_end))
-    return splits
+        if test_start >= n_samples or test_end <= test_start:
+            continue
+        
+        wf_X_train = X_all[:train_end]
+        wf_y_train = y_all[:train_end]
+        wf_X_test = X_all[test_start:test_end]
+        wf_y_test = y_all[test_start:test_end]
+        wf_weights = time_weights[:train_end]
+        
+        scaler_wf = StandardScaler()
+        wf_X_train_s = scaler_wf.fit_transform(wf_X_train)
+        wf_X_test_s = scaler_wf.transform(wf_X_test)
+        
+        try:
+            # LightGBM in walk-forward
+            lgb_wf = lgb.LGBMClassifier(
+                n_estimators=200, learning_rate=0.05, max_depth=6,
+                num_leaves=31, min_child_samples=20, subsample=0.8,
+                colsample_bytree=0.8, reg_alpha=0.1, reg_lambda=0.1,
+                random_state=42, verbosity=-1, n_jobs=-1
+            )
+            lgb_wf.fit(wf_X_train_s, wf_y_train, sample_weight=wf_weights)
+            lgb_acc = np.mean(lgb_wf.predict(wf_X_test_s) == wf_y_test)
+            wf_direction_scores.append(lgb_acc)
+        except Exception:
+            pass
+        
+        try:
+            # Logistic Regression in walk-forward
+            lr_wf = LogisticRegression(C=0.1, max_iter=500, class_weight='balanced', random_state=42)
+            lr_wf.fit(wf_X_train_s, wf_y_train, sample_weight=wf_weights)
+            lr_acc = np.mean(lr_wf.predict(wf_X_test_s) == wf_y_test)
+            wf_direction_scores.append(lr_acc)
+        except Exception:
+            pass
+    
+    wf_accuracy = np.mean(wf_direction_scores) * 100 if wf_direction_scores else 50.0
+    
+    # Train final models on 80% of data (time-ordered)
+    train_end_final = int(n_samples * 0.8)
+    X_train = X_all[:train_end_final]
+    y_train = y_all[:train_end_final]
+    weights_train = time_weights[:train_end_final]
+    
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    
+    # LightGBM Classifier
+    lgb_model = lgb.LGBMClassifier(
+        n_estimators=200, learning_rate=0.05, max_depth=6,
+        num_leaves=31, min_child_samples=20, subsample=0.8,
+        colsample_bytree=0.8, reg_alpha=0.1, reg_lambda=0.1,
+        random_state=42, verbosity=-1, n_jobs=-1
+    )
+    lgb_model.fit(X_train_scaled, y_train, sample_weight=weights_train)
+    
+    # Logistic Regression (diverse second model)
+    lr_model = LogisticRegression(C=0.1, max_iter=500, class_weight='balanced', random_state=42)
+    lr_model.fit(X_train_scaled, y_train, sample_weight=weights_train)
+    
+    # Test set accuracy for confidence calibration
+    X_test = X_all[train_end_final:]
+    y_test = y_all[train_end_final:]
+    X_test_scaled = scaler.transform(X_test)
+    
+    lgb_test_acc = np.mean(lgb_model.predict(X_test_scaled) == y_test) * 100
+    lr_test_acc = np.mean(lr_model.predict(X_test_scaled) == y_test) * 100
+    
+    log_message(f"    {days_ahead}-day model trained on {len(X_train):,} samples | "
+                f"WF acc: {wf_accuracy:.1f}% | Test acc: LGB={lgb_test_acc:.1f}%, LR={lr_test_acc:.1f}%")
+    
+    return lgb_model, lr_model, scaler, wf_accuracy
 
 
-def process_single_ticker(args):
+def predict_for_ticker(ticker_df, lgb_model, lr_model, scaler, wf_accuracy, days_ahead):
     """
-    OPTIMIZATION #2: Worker function for multiprocessing.
-    Processes one ticker and returns results (no DB writes here).
+    Generate direction prediction for a single ticker using trained market model.
     
-    Returns list of dicts with prediction results to be batch-inserted by main process.
+    Returns: (direction, predicted_change_pct, confidence) or (None, None, None)
     """
-    ticker, company_name, df_raw, market, all_models, performance_history_for_ticker, prediction_days = args
+    feature_cols = [f for f in SELECTED_FEATURES if f in ticker_df.columns]
+    if len(feature_cols) < 10:
+        return None, None, None
     
-    results = []
+    latest = ticker_df[feature_cols].iloc[-1:].values
+    latest_scaled = scaler.transform(latest)
     
-    try:
-        # OPTIMIZATION #3: Calculate indicators ONCE per ticker (reused across horizons)
+    # Ensemble: average probabilities from both models
+    lgb_proba = lgb_model.predict_proba(latest_scaled)[0]  # [P(down), P(up)]
+    lr_proba = lr_model.predict_proba(latest_scaled)[0]
+    
+    # Average probabilities (LightGBM gets 60% weight, LogReg 40%)
+    avg_proba = 0.6 * lgb_proba + 0.4 * lr_proba
+    direction = 1 if avg_proba[1] > 0.5 else 0  # 1=UP, 0=DOWN
+    direction_prob = avg_proba[1] if direction == 1 else avg_proba[0]
+    
+    # Estimate magnitude from recent median absolute returns
+    recent_returns = ticker_df['close_price'].pct_change(days_ahead).dropna().tail(60)
+    if len(recent_returns) > 10:
+        median_abs_return = recent_returns.abs().median()
+    else:
+        median_abs_return = 0.02  # Default 2%
+    
+    # predicted_change_pct: direction * estimated magnitude
+    sign = 1.0 if direction == 1 else -1.0
+    predicted_change_pct = sign * median_abs_return * 100  # As percentage
+    
+    # Confidence: blend of walk-forward accuracy + model probability + model agreement
+    lgb_dir = 1 if lgb_proba[1] > 0.5 else 0
+    lr_dir = 1 if lr_proba[1] > 0.5 else 0
+    agreement = 100.0 if lgb_dir == lr_dir else 50.0
+    
+    confidence = (
+        0.50 * wf_accuracy +           # Walk-forward accuracy (honest OOS)
+        0.30 * (direction_prob * 100) + # Model probability
+        0.20 * agreement                # Model agreement
+    )
+    confidence = max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, confidence))
+    
+    return direction, predicted_change_pct, confidence
+
+
+def pool_market_data(all_stock_data):
+    """
+    Pool all tickers' data into a single market-level DataFrame for per-market training.
+    Each ticker's features are computed independently, then concatenated.
+    """
+    all_frames = []
+    ticker_latest = {}  # {ticker: DataFrame} — last row per ticker for prediction
+    
+    for ticker, df_raw in all_stock_data.items():
         df = calculate_technical_indicators(df_raw)
         if len(df) < MIN_DATA_POINTS:
-            return results  # Empty
+            continue
         
-        current_price = df['close_price'].iloc[-1]
+        # Save latest row for this ticker (for prediction after training)
+        ticker_latest[ticker] = df.copy()
         
-        # OPTIMIZATION #5: Pre-compute walk-forward splits ONCE per ticker
-        feature_cols = [col for col in df.columns if col not in EXCLUDE_FROM_FEATURES]
-        # Estimate n_samples (approximate; exact count varies per horizon due to target shift)
-        n_samples_approx = len(df) - max(prediction_days)
-        shared_wf_splits = compute_shared_wf_splits(n_samples_approx, max(prediction_days))
-        
-        for days_ahead in prediction_days:
-            # Active learning: select models
-            perf_hist = performance_history_for_ticker.get(days_ahead, {})
-            
-            if USE_ACTIVE_LEARNING and perf_hist:
-                selected_models = select_best_models(perf_hist, all_models)
-            else:
-                selected_models = all_models
-            
-            try:
-                predicted_change, confidence = train_and_predict_ensemble(
-                    df, days_ahead, selected_models, shared_wf_splits=shared_wf_splits
-                )
-                
-                if predicted_change is not None:
-                    # Apply active learning confidence adjustment
-                    if USE_ACTIVE_LEARNING and perf_hist:
-                        best_hist_model = max(
-                            perf_hist.items(),
-                            key=lambda x: x[1]['direction_accuracy'],
-                            default=(None, None)
-                        )
-                        if best_hist_model[0]:
-                            confidence = adjust_confidence_with_history(
-                                confidence, best_hist_model[0], perf_hist
-                            )
-                    
-                    results.append({
-                        'market': market,
-                        'ticker': ticker,
-                        'company_name': company_name,
-                        'days_ahead': days_ahead,
-                        'model_name': 'Ensemble',
-                        'current_price': float(current_price),
-                        'predicted_change': float(predicted_change),
-                        'confidence': float(confidence),
-                    })
-            except Exception as e:
-                # Log error but don't crash the worker
-                pass
-    except Exception as e:
-        pass  # Worker errors are non-fatal
+        # Add ticker column (excluded from features but used for grouping)
+        df['ticker'] = ticker
+        all_frames.append(df)
     
-    return results
+    if not all_frames:
+        return pd.DataFrame(), ticker_latest
+    
+    market_df = pd.concat(all_frames, ignore_index=True)
+    # Sort by trading_date for proper time-series walk-forward
+    market_df = market_df.sort_values('trading_date').reset_index(drop=True)
+    
+    return market_df, ticker_latest
 
 def store_prediction(cursor, market, ticker, company_name, days_ahead, model_name, 
                     current_price, predicted_change, confidence):
@@ -903,15 +706,17 @@ def update_actual_prices(conn):
 
 def run_daily_predictions(markets_filter=None):
     """
-    Main function to run daily predictions with ACTIVE LEARNING.
+    Main function: per-MARKET classification training + per-ticker prediction.
     
-    Args:
-        markets_filter: list of market names to process, or None for all markets.
-                        Supports CLI: --market "NSE 500" or --market "NASDAQ 100"
+    Flow per market:
+    1. Load all tickers' data (bulk query)
+    2. Compute features per ticker, pool into market DataFrame
+    3. Train ONE LightGBM + ONE LogReg model on pooled data (per horizon)
+    4. Predict direction for each ticker using trained model
+    5. Store predictions
     """
     start_time = datetime.now()
     
-    # Determine which markets to process
     if markets_filter:
         markets_to_process = {k: v for k, v in MARKETS.items() if k in markets_filter}
         if not markets_to_process:
@@ -921,25 +726,21 @@ def run_daily_predictions(markets_filter=None):
         markets_to_process = MARKETS
     
     log_message("=" * 80)
-    log_message("Starting Daily AI Price Prediction Job (Strategy 2) -- OPTIMIZED")
+    log_message("Starting Daily AI Direction Prediction Job (v3 - Classification)")
     log_message(f"Markets: {', '.join(markets_to_process.keys())}")
-    log_message(f"Parallel workers: {NUM_WORKERS}")
+    log_message(f"Models: LightGBM + Logistic Regression (per-market training)")
+    log_message(f"Features: {len(SELECTED_FEATURES)} selected indicators")
+    log_message(f"Horizons: {PREDICTION_DAYS}")
     if USE_ACTIVE_LEARNING:
-        log_message("ACTIVE LEARNING ENABLED - Using historical performance feedback")
+        log_message("ACTIVE LEARNING ENABLED")
     log_message("=" * 80)
     
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Step 1: Update actual prices for past predictions (backtest)
+    # Step 1: Update actual prices for past predictions
     log_message("Step 1: Updating actual prices for past predictions...")
     update_actual_prices(conn)
-    
-    # Models to use
-    all_models = ['XGBoost', 'Random Forest', 'Gradient Boosting']
-    if not XGBOOST_AVAILABLE:
-        all_models = ['Random Forest', 'Gradient Boosting', 'Linear Regression']
-    log_message(f"Models available: {', '.join(all_models)}")
     
     total_predictions = 0
     total_skipped_dup = 0
@@ -947,120 +748,109 @@ def run_daily_predictions(markets_filter=None):
     total_skipped_unchanged = 0
     errors = 0
     
-    # Step 2: Generate predictions for each market
+    # Step 2: Per-market training and prediction
     for market in markets_to_process.keys():
         log_message(f"\nStep 2: Processing {market}...")
         market_start = datetime.now()
         
-        # Get stocks (reuse connection)
+        # Get stocks
         stocks = get_top_stocks(conn, market, MAX_STOCKS_PER_MARKET)
         log_message(f"  Found {len(stocks)} stocks to analyze")
         
-        # OPTIMIZATION #4: Skip tickers with no new data since last prediction
+        # Skip tickers with no new data
         tickers_with_updates = get_tickers_with_new_data(conn, market)
         original_count = len(stocks)
         stocks = stocks[stocks['ticker'].isin(tickers_with_updates)]
         skipped_unchanged = original_count - len(stocks)
         total_skipped_unchanged += skipped_unchanged
         if skipped_unchanged > 0:
-            log_message(f"  Skipped {skipped_unchanged} tickers with no new data (already predicted)")
-        log_message(f"  {len(stocks)} tickers to process after filtering")
+            log_message(f"  Skipped {skipped_unchanged} tickers with no new data")
+        log_message(f"  {len(stocks)} tickers to process")
         
         if len(stocks) == 0:
             log_message(f"  {market} complete: No tickers need predictions")
             continue
         
-        # OPTIMIZATION: Bulk preload ALL stock data in one query
+        # Build ticker → company_name lookup
+        ticker_company = dict(zip(stocks['ticker'], stocks['company_name']))
+        
+        # Bulk load all stock data
         ticker_list = stocks['ticker'].tolist()
         all_stock_data = bulk_load_stock_data(conn, market, ticker_list)
-        log_message(f"  {len(all_stock_data)} tickers have sufficient data (>= {MIN_DATA_POINTS} rows)")
+        tickers_with_data = len(all_stock_data)
+        total_skipped_data += len(ticker_list) - tickers_with_data
+        log_message(f"  {tickers_with_data} tickers have sufficient data (>= {MIN_DATA_POINTS} rows)")
         
-        # OPTIMIZATION: Bulk preload ALL active learning history in one query
+        # Bulk preload active learning history
         all_performance_history = {}
         if USE_ACTIVE_LEARNING:
-            perf_start = datetime.now()
             all_performance_history = bulk_load_performance_history(conn, market)
-            perf_elapsed = (datetime.now() - perf_start).total_seconds()
-            tickers_with_history = len(all_performance_history)
-            log_message(f"  Loaded active learning history for {tickers_with_history} tickers in {perf_elapsed:.1f}s")
+            log_message(f"  Loaded active learning history for {len(all_performance_history)} tickers")
         
-        # Build worker arguments for multiprocessing
-        worker_args = []
-        for _, row in stocks.iterrows():
-            ticker = row['ticker']
-            company_name = row['company_name']
+        # Pool all tickers into market-level DataFrame
+        log_message(f"  Computing features and pooling market data...")
+        pool_start = datetime.now()
+        market_df, ticker_latest = pool_market_data(all_stock_data)
+        pool_elapsed = (datetime.now() - pool_start).total_seconds()
+        log_message(f"  Pooled {len(market_df):,} rows from {len(ticker_latest)} tickers in {pool_elapsed:.1f}s")
+        
+        if len(market_df) < MIN_MARKET_SAMPLES:
+            log_message(f"  {market} skipped: insufficient pooled data ({len(market_df)} < {MIN_MARKET_SAMPLES})")
+            continue
+        
+        # Train and predict for each horizon
+        market_predictions = 0
+        for days_ahead in PREDICTION_DAYS:
+            log_message(f"  Training {days_ahead}-day model for {market}...")
+            train_start = datetime.now()
             
-            if ticker not in all_stock_data:
-                total_skipped_data += 1
+            lgb_model, lr_model, scaler, wf_accuracy = train_market_model(market_df, days_ahead)
+            train_elapsed = (datetime.now() - train_start).total_seconds()
+            
+            if lgb_model is None:
+                log_message(f"  {days_ahead}-day model training failed, skipping", "WARNING")
                 continue
             
-            df_raw = all_stock_data[ticker]
-            perf_hist = all_performance_history.get(ticker, {})
+            log_message(f"  Model trained in {train_elapsed:.1f}s, predicting for {len(ticker_latest)} tickers...")
             
-            worker_args.append((
-                ticker, company_name, df_raw, market,
-                all_models, perf_hist, PREDICTION_DAYS
-            ))
-        
-        log_message(f"  Dispatching {len(worker_args)} tickers to {NUM_WORKERS} parallel workers...")
-        
-        # OPTIMIZATION #2: Process tickers in parallel using multiprocessing
-        market_predictions = 0
-        all_results = []
-        
-        if NUM_WORKERS > 1 and len(worker_args) > 5:
-            with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
-                futures = {executor.submit(process_single_ticker, args): args[0] for args in worker_args}
-                completed = 0
-                for future in as_completed(futures):
-                    completed += 1
-                    ticker_name = futures[future]
-                    try:
-                        results = future.result()
-                        all_results.extend(results)
-                    except Exception as e:
-                        errors += 1
-                        log_message(f"    Worker error for {ticker_name}: {str(e)}", "ERROR")
-                    
-                    if completed % 50 == 0:
-                        log_message(f"  Completed {completed}/{len(worker_args)} tickers...")
-        else:
-            # Sequential fallback for small batches or single worker
-            for i, args in enumerate(worker_args):
+            # Predict for each ticker
+            for ticker, ticker_df in ticker_latest.items():
                 try:
-                    results = process_single_ticker(args)
-                    all_results.extend(results)
+                    direction, predicted_change_pct, confidence = predict_for_ticker(
+                        ticker_df, lgb_model, lr_model, scaler, wf_accuracy, days_ahead
+                    )
+                    
+                    if direction is None:
+                        continue
+                    
+                    # Active learning: adjust confidence
+                    if USE_ACTIVE_LEARNING:
+                        perf_hist = all_performance_history.get(ticker, {}).get(days_ahead, {})
+                        if perf_hist:
+                            confidence = adjust_confidence_with_history(
+                                confidence, 'Ensemble', perf_hist
+                            )
+                    
+                    current_price = float(ticker_df['close_price'].iloc[-1])
+                    company_name = ticker_company.get(ticker, ticker)
+                    
+                    inserted = store_prediction(
+                        cursor, market, ticker, company_name, days_ahead, 'Ensemble',
+                        current_price, predicted_change_pct / 100.0, confidence
+                    )
+                    if inserted:
+                        total_predictions += 1
+                        market_predictions += 1
+                    else:
+                        total_skipped_dup += 1
+                        
                 except Exception as e:
                     errors += 1
-                    log_message(f"    Error processing {args[0]}: {str(e)}", "ERROR")
-                
-                if (i + 1) % 50 == 0:
-                    log_message(f"  Processed {i + 1}/{len(worker_args)} tickers...")
+                    log_message(f"    Error predicting {ticker}: {str(e)}", "ERROR")
         
-        # Batch-insert all results into DB (main process only — thread-safe)
-        log_message(f"  Inserting {len(all_results)} predictions into database...")
-        for result in all_results:
-            try:
-                inserted = store_prediction(
-                    cursor, result['market'], result['ticker'], result['company_name'],
-                    result['days_ahead'], result['model_name'],
-                    result['current_price'], result['predicted_change'], result['confidence']
-                )
-                if inserted:
-                    total_predictions += 1
-                    market_predictions += 1
-                else:
-                    total_skipped_dup += 1
-            except Exception as e:
-                errors += 1
-                log_message(f"    DB insert error for {result['ticker']}: {str(e)}", "ERROR")
+        # Free memory
+        del all_stock_data, market_df, ticker_latest
         
-        # Free memory for this market's bulk data
-        del all_stock_data
-        del all_performance_history
-        del all_results
-        
-        # Commit after each market (batch commit)
         conn.commit()
         market_elapsed = (datetime.now() - market_start).total_seconds()
         log_message(f"  {market} complete: {market_predictions} predictions in {market_elapsed:.1f}s")
@@ -1071,31 +861,25 @@ def run_daily_predictions(markets_filter=None):
     elapsed = (datetime.now() - start_time).total_seconds()
     log_message("")
     log_message("=" * 80)
-    log_message(f"Daily Prediction Job Completed Successfully!")
+    log_message(f"Daily Direction Prediction Job (v3) Completed!")
     log_message(f"  Total Predictions Generated: {total_predictions}")
     log_message(f"  Duplicates Skipped:          {total_skipped_dup}")
     log_message(f"  Stocks Skipped (no data):    {total_skipped_data}")
     log_message(f"  Stocks Skipped (unchanged):  {total_skipped_unchanged}")
     log_message(f"  Errors:                      {errors}")
-    log_message(f"  Parallel Workers Used:       {NUM_WORKERS}")
+    log_message(f"  Model: LightGBM + LogReg (per-market classification)")
+    log_message(f"  Features: {len(SELECTED_FEATURES)}")
     log_message(f"  Total Time:                  {elapsed:.1f}s ({elapsed/60:.1f} min)")
     log_message("=" * 80)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Daily AI Price Prediction Job (Strategy 2)")
+    parser = argparse.ArgumentParser(description="Daily AI Direction Prediction Job (v3 - Classification)")
     parser.add_argument(
         '--market', type=str, nargs='+',
-        help='Market(s) to process. E.g.: --market "NSE 500" or --market "NASDAQ 100" or both. Default: all markets.',
+        help='Market(s) to process. E.g.: --market "NSE 500" or --market "NASDAQ 100". Default: all.',
         default=None
     )
-    parser.add_argument(
-        '--workers', type=int, default=None,
-        help=f'Number of parallel workers (default: {NUM_WORKERS} = cpu_count - 1)'
-    )
     args = parser.parse_args()
-    
-    if args.workers:
-        NUM_WORKERS = args.workers
     
     try:
         run_daily_predictions(markets_filter=args.market)
