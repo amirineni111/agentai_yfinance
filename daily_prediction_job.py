@@ -53,9 +53,9 @@ def get_db_connection():
 
 # Configuration
 MARKETS = {
-    'NSE 500': {'table': 'nse_500_hist_data', 'symbol_col': 'ticker', 'company_col': 'company'},
-    'NASDAQ 100': {'table': 'nasdaq_100_hist_data', 'symbol_col': 'ticker', 'company_col': 'company'},
-    'Forex': {'table': 'forex_hist_data', 'symbol_col': 'symbol', 'company_col': 'symbol'},
+    'NSE 500': {'table': 'nse_500_hist_data', 'symbol_col': 'ticker', 'company_col': 'company', 'rsi_table': 'nse_500_rsi_data', 'rsi_col': 'ticker'},
+    'NASDAQ 100': {'table': 'nasdaq_100_hist_data', 'symbol_col': 'ticker', 'company_col': 'company', 'rsi_table': 'nasdaq_100_rsi_data', 'rsi_col': 'ticker'},
+    'Forex': {'table': 'forex_hist_data', 'symbol_col': 'symbol', 'company_col': 'symbol', 'rsi_table': 'forex_rsi_data', 'rsi_col': 'symbol'},
 }
 
 # S2-1: Dropped 1-day predictions (37% accuracy = worse than coin flip)
@@ -307,11 +307,40 @@ def bulk_load_stock_data(conn, market, tickers):
     
     return stock_data
 
-def calculate_technical_indicators(df):
+def bulk_load_rsi_data(conn, market, tickers):
+    """Bulk load pre-computed Wilder's RSI from materialized tables.
+    Returns dict: {ticker: DataFrame with [trading_date, RSI]}.
+    """
+    config = MARKETS[market]
+    rsi_table = config['rsi_table']
+    rsi_col = config['rsi_col']
+    
+    placeholders = ','.join(['?' for _ in tickers])
+    query = f"""
+    SELECT {rsi_col} as ticker, trading_date, RSI
+    FROM dbo.{rsi_table}
+    WHERE {rsi_col} IN ({placeholders})
+    ORDER BY {rsi_col}, trading_date ASC
+    """
+    df_all = pd.read_sql(query, conn, params=tickers)
+    
+    rsi_by_ticker = {}
+    for ticker in tickers:
+        rsi_df = df_all[df_all['ticker'] == ticker][['trading_date', 'RSI']].copy()
+        if not rsi_df.empty:
+            rsi_by_ticker[ticker] = rsi_df
+    
+    return rsi_by_ticker
+
+
+def calculate_technical_indicators(df, rsi_df=None):
     """Calculate the 15 selected technical indicators for ML features.
     
     Trimmed from 48+ features to eliminate redundant/correlated indicators.
     All features are normalized (ratios, percentages) for cross-stock comparability.
+    
+    RSI is loaded from pre-computed Wilder's smoothing tables (matching TradingView).
+    If rsi_df is None, falls back to inline SMA calculation.
     """
     df = df.copy()
     
@@ -325,12 +354,18 @@ def calculate_technical_indicators(df):
     # 1. returns — daily % change
     df['returns'] = df['close_price'].pct_change()
     
-    # 2. RSI (14-period)
-    delta = df['close_price'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
+    # 2. RSI (14-period, Wilder's smoothing from pre-computed table)
+    if rsi_df is not None and not rsi_df.empty:
+        df = df.merge(rsi_df[['trading_date', 'RSI']], on='trading_date', how='left')
+        df['rsi'] = df['RSI']
+        df.drop(columns=['RSI'], inplace=True)
+    else:
+        # Fallback: inline SMA method (less accurate than Wilder's)
+        delta = df['close_price'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
     
     # 3. rsi_change — RSI momentum
     df['rsi_change'] = df['rsi'].diff()
@@ -569,16 +604,18 @@ def predict_for_ticker(ticker_df, lgb_model, lr_model, scaler, wf_accuracy, days
     return direction, predicted_change_pct, confidence
 
 
-def pool_market_data(all_stock_data):
+def pool_market_data(all_stock_data, rsi_by_ticker=None):
     """
     Pool all tickers' data into a single market-level DataFrame for per-market training.
     Each ticker's features are computed independently, then concatenated.
     """
+    if rsi_by_ticker is None:
+        rsi_by_ticker = {}
     all_frames = []
     ticker_latest = {}  # {ticker: DataFrame} — last row per ticker for prediction
     
     for ticker, df_raw in all_stock_data.items():
-        df = calculate_technical_indicators(df_raw)
+        df = calculate_technical_indicators(df_raw, rsi_df=rsi_by_ticker.get(ticker))
         if len(df) < MIN_DATA_POINTS:
             continue
         
@@ -787,10 +824,14 @@ def run_daily_predictions(markets_filter=None):
             all_performance_history = bulk_load_performance_history(conn, market)
             log_message(f"  Loaded active learning history for {len(all_performance_history)} tickers")
         
+        # Bulk load pre-computed Wilder's RSI
+        rsi_by_ticker = bulk_load_rsi_data(conn, market, ticker_list)
+        log_message(f"  Loaded Wilder's RSI for {len(rsi_by_ticker)} tickers")
+        
         # Pool all tickers into market-level DataFrame
         log_message(f"  Computing features and pooling market data...")
         pool_start = datetime.now()
-        market_df, ticker_latest = pool_market_data(all_stock_data)
+        market_df, ticker_latest = pool_market_data(all_stock_data, rsi_by_ticker=rsi_by_ticker)
         pool_elapsed = (datetime.now() - pool_start).total_seconds()
         log_message(f"  Pooled {len(market_df):,} rows from {len(ticker_latest)} tickers in {pool_elapsed:.1f}s")
         
