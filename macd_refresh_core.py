@@ -14,11 +14,14 @@ For new tickers (no MACD data yet), full calculation from scratch.
 Tables: nasdaq_100_macd_data, nse_500_macd_data, forex_macd_data
 Columns: ticker/symbol, trading_date, EMA_12, EMA_26, MACD, Signal_Line, Histogram
 """
+import os
 import pyodbc
 import pandas as pd
 import numpy as np
 import logging
 from datetime import datetime
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CONN_STR = (
     'DRIVER={ODBC Driver 17 for SQL Server};'
@@ -33,6 +36,18 @@ EMA26_MULT = 2.0 / 27  # 0.074074
 SIG9_MULT  = 2.0 / 10  # 0.200000
 
 
+def _sanitize(val):
+    """Convert NaN to None for SQL insertion."""
+    if val is None:
+        return None
+    try:
+        if np.isnan(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return val
+
+
 def get_logger(market_name):
     log = logging.getLogger(f'macd_refresh_{market_name}')
     if log.handlers:
@@ -43,7 +58,7 @@ def get_logger(market_name):
     ch.setFormatter(fmt)
     log.addHandler(ch)
     fh = logging.FileHandler(
-        f'macd_refresh_{market_name}_{datetime.now().strftime("%Y%m%d")}.log'
+        os.path.join(_SCRIPT_DIR, f'macd_refresh_{market_name}_{datetime.now().strftime("%Y%m%d")}.log')
     )
     fh.setFormatter(fmt)
     log.addHandler(fh)
@@ -156,9 +171,9 @@ def refresh_market_macd(source_table, target_table, id_col, market_label):
     for _, row in last_state_df.iterrows():
         last_state[row[id_col]] = {
             'last_date': row['trading_date'],
-            'ema12': row['EMA_12'],
-            'ema26': row['EMA_26'],
-            'signal': row['Signal_Line'],
+            'ema12': _sanitize(row['EMA_12']),
+            'ema26': _sanitize(row['EMA_26']),
+            'signal': _sanitize(row['Signal_Line']),
         }
     log.info(f"  {len(last_state)} tickers have existing MACD data")
 
@@ -246,9 +261,13 @@ def refresh_market_macd(source_table, target_table, id_col, market_label):
             f"INSERT INTO dbo.{target_table} "
             f"({id_col}, trading_date, EMA_12, EMA_26, MACD, Signal_Line, Histogram) "
             f"VALUES (?, ?, ?, ?, ?, ?, ?)")
+        clean_rows = [
+            (t, dt, _sanitize(e12), _sanitize(e26), _sanitize(m), _sanitize(s), _sanitize(h))
+            for t, dt, e12, e26, m, s, h in insert_rows
+        ]
         batch_size = 10000
-        for i in range(0, len(insert_rows), batch_size):
-            batch = insert_rows[i:i + batch_size]
+        for i in range(0, len(clean_rows), batch_size):
+            batch = clean_rows[i:i + batch_size]
             cursor.executemany(insert_sql, batch)
         log.info(f"  Inserted {len(insert_rows)} rows into {target_table}")
     else:

@@ -14,13 +14,29 @@ For new tickers (no RSI data yet), full calculation from scratch.
 Tables: nasdaq_100_rsi_data, nse_500_rsi_data, forex_rsi_data
 Columns: ticker/symbol, trading_date, RSI, avg_gain, avg_loss
 """
+import os
 import pyodbc
 import pandas as pd
 import numpy as np
 import logging
 from datetime import datetime
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 RSI_PERIOD = 14
+
+
+def _sanitize(val):
+    """Convert NaN to None for SQL insertion."""
+    if val is None:
+        return None
+    try:
+        if np.isnan(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return val
+
 
 CONN_STR = (
     'DRIVER={ODBC Driver 17 for SQL Server};'
@@ -44,7 +60,7 @@ def get_logger(market_name):
     log.addHandler(ch)
 
     fh = logging.FileHandler(
-        f'rsi_refresh_{market_name}_{datetime.now().strftime("%Y%m%d")}.log'
+        os.path.join(_SCRIPT_DIR, f'rsi_refresh_{market_name}_{datetime.now().strftime("%Y%m%d")}.log')
     )
     fh.setFormatter(fmt)
     log.addHandler(fh)
@@ -155,8 +171,8 @@ def refresh_market_rsi(source_table, target_table, id_col, market_label):
     for _, row in last_state_df.iterrows():
         last_state[row[id_col]] = {
             'last_date': row['trading_date'],
-            'avg_gain': row['avg_gain'],
-            'avg_loss': row['avg_loss'],
+            'avg_gain': _sanitize(row['avg_gain']),
+            'avg_loss': _sanitize(row['avg_loss']),
         }
     log.info(f"  {len(last_state)} tickers have existing RSI data")
 
@@ -261,9 +277,13 @@ def refresh_market_rsi(source_table, target_table, id_col, market_label):
             f"INSERT INTO dbo.{target_table} ({id_col}, trading_date, RSI, avg_gain, avg_loss) "
             f"VALUES (?, ?, ?, ?, ?)"
         )
+        clean_rows = [
+            (t, dt, _sanitize(rsi), _sanitize(ag), _sanitize(al))
+            for t, dt, rsi, ag, al in insert_rows
+        ]
         batch_size = 5000
-        for i in range(0, len(insert_rows), batch_size):
-            batch = insert_rows[i:i + batch_size]
+        for i in range(0, len(clean_rows), batch_size):
+            batch = clean_rows[i:i + batch_size]
             cursor.executemany(insert_sql, batch)
         log.info(f"  Inserted {len(insert_rows)} rows into {target_table}")
     else:

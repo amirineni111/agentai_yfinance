@@ -17,11 +17,14 @@ ATR_14 = Wilder's: first ATR = SMA(TR, 14), then ATR_t = (ATR_{t-1} * 13 + TR_t)
 Tables: nasdaq_100_atr_data, nse_500_atr_data, forex_atr_data
 Columns: ticker/symbol, trading_date, close_price, high_price, low_price, true_range, ATR_14
 """
+import os
 import pyodbc
 import pandas as pd
 import numpy as np
 import logging
 from datetime import datetime
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CONN_STR = (
     'DRIVER={ODBC Driver 17 for SQL Server};'
@@ -34,6 +37,18 @@ CONN_STR = (
 ATR_PERIOD = 14
 
 
+def _sanitize(val):
+    """Convert NaN to None for SQL insertion."""
+    if val is None:
+        return None
+    try:
+        if np.isnan(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return val
+
+
 def get_logger(market_name):
     log = logging.getLogger(f'atr_refresh_{market_name}')
     if log.handlers:
@@ -44,7 +59,7 @@ def get_logger(market_name):
     ch.setFormatter(fmt)
     log.addHandler(ch)
     fh = logging.FileHandler(
-        f'atr_refresh_{market_name}_{datetime.now().strftime("%Y%m%d")}.log'
+        os.path.join(_SCRIPT_DIR, f'atr_refresh_{market_name}_{datetime.now().strftime("%Y%m%d")}.log')
     )
     fh.setFormatter(fmt)
     log.addHandler(fh)
@@ -168,8 +183,8 @@ def refresh_market_atr(source_table, target_table, id_col, market_label):
     for _, row in last_state_df.iterrows():
         last_state[row[id_col]] = {
             'last_date': row['trading_date'],
-            'atr': row['ATR_14'],
-            'close': row['close_price'],
+            'atr': _sanitize(row['ATR_14']),
+            'close': _sanitize(row['close_price']),
         }
     log.info(f"  {len(last_state)} tickers have existing ATR data")
 
@@ -272,9 +287,13 @@ def refresh_market_atr(source_table, target_table, id_col, market_label):
     # 5. Bulk insert all new rows
     if insert_rows:
         log.info(f"Inserting {len(insert_rows)} rows into {target_table}...")
+        clean_rows = [
+            (t, dt, _sanitize(cl), _sanitize(h), _sanitize(l), _sanitize(tr), _sanitize(atr))
+            for t, dt, cl, h, l, tr, atr in insert_rows
+        ]
         batch_size = 5000
-        for i in range(0, len(insert_rows), batch_size):
-            batch = insert_rows[i:i + batch_size]
+        for i in range(0, len(clean_rows), batch_size):
+            batch = clean_rows[i:i + batch_size]
             cursor.executemany(f"""
                 INSERT INTO dbo.{target_table}
                 ({id_col}, trading_date, close_price, high_price, low_price, true_range, ATR_14)

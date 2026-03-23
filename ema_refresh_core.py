@@ -14,11 +14,14 @@ For new tickers (no EMA data yet), full calculation from scratch.
 Tables: nasdaq_100_ema_sma_data, nse_500_ema_sma_data, forex_ema_sma_data
 Columns: ticker/symbol, trading_date, close_price, SMA_20, SMA_50, EMA_20, EMA_50, EMA_100, EMA_200
 """
+import os
 import pyodbc
 import pandas as pd
 import numpy as np
 import logging
 from datetime import datetime
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CONN_STR = (
     'DRIVER={ODBC Driver 17 for SQL Server};'
@@ -35,6 +38,18 @@ SMA_PERIODS = [20, 50]
 EMA_MULT = {p: 2.0 / (p + 1) for p in EMA_PERIODS}
 
 
+def _sanitize(val):
+    """Convert NaN/numpy NaN to None for SQL insertion."""
+    if val is None:
+        return None
+    try:
+        if np.isnan(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return val
+
+
 def get_logger(market_name):
     log = logging.getLogger(f'ema_refresh_{market_name}')
     if log.handlers:
@@ -45,7 +60,7 @@ def get_logger(market_name):
     ch.setFormatter(fmt)
     log.addHandler(ch)
     fh = logging.FileHandler(
-        f'ema_refresh_{market_name}_{datetime.now().strftime("%Y%m%d")}.log'
+        os.path.join(_SCRIPT_DIR, f'ema_refresh_{market_name}_{datetime.now().strftime("%Y%m%d")}.log')
     )
     fh.setFormatter(fmt)
     log.addHandler(fh)
@@ -286,9 +301,15 @@ def refresh_market_ema(source_table, target_table, id_col, market_label):
     # 5. Bulk insert all new rows
     if insert_rows:
         log.info(f"Inserting {len(insert_rows)} rows into {target_table}...")
+        # Sanitize NaN -> None for SQL Server compatibility
+        clean_rows = [
+            (t, dt, _sanitize(cl), _sanitize(s20), _sanitize(s50),
+             _sanitize(e20), _sanitize(e50), _sanitize(e100), _sanitize(e200))
+            for t, dt, cl, s20, s50, e20, e50, e100, e200 in insert_rows
+        ]
         batch_size = 5000
-        for i in range(0, len(insert_rows), batch_size):
-            batch = insert_rows[i:i + batch_size]
+        for i in range(0, len(clean_rows), batch_size):
+            batch = clean_rows[i:i + batch_size]
             cursor.executemany(f"""
                 INSERT INTO dbo.{target_table}
                 ({id_col}, trading_date, close_price, SMA_20, SMA_50,

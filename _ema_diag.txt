@@ -1,0 +1,21 @@
+=== nse_500_ema_sma_data columns ===
+  ticker               varchar         nullable=NO
+  trading_date         date            nullable=NO
+  close_price          float           nullable=YES
+  SMA_20               float           nullable=YES
+  SMA_50               float           nullable=YES
+  EMA_20               float           nullable=YES
+  EMA_50               float           nullable=YES
+  EMA_100              float           nullable=YES
+  EMA_200              float           nullable=YES
+
+Existing data: total=733408, NULL EMA_200=154329, NULL EMA_100=77132
+
+Tickers with < 200 rows:
+  ISEC.NS: 1 rows
+  LTM.NS: 23 rows
+  CCAVENUE.NS: 39 rows
+  BHARATCOAL.NS: 45 rows
+  VIYASH.NS: 46 rows
+
+round(NaN, 4) = nan, type=<class 'numpy.float64'>, is None? False, isnan? True
