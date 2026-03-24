@@ -34,7 +34,9 @@ def get_db_connection():
         "DATABASE=stockdata_db;"
         "Trusted_Connection=yes;"
     )
-    return pyodbc.connect(conn_str)
+    conn = pyodbc.connect(conn_str, timeout=30)
+    conn.timeout = 600  # 10-minute query timeout (per statement)
+    return conn
 
 def log_message(message, level="INFO"):
     """Print timestamped log message"""
