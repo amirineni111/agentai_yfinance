@@ -104,26 +104,21 @@ def backfill_nasdaq_predictions(conn):
     cursor.execute("""
         UPDATE p
         SET 
-            p.actual_return_5d = ((CAST(future.close_price AS FLOAT) - p.close_price) / p.close_price) * 100,
+            p.actual_return_5d = ((CAST(future.close_price_5d AS FLOAT) - p.close_price) / p.close_price) * 100,
             p.direction_correct_5d = CASE 
-                WHEN p.predicted_signal LIKE '%Buy%' AND CAST(future.close_price AS FLOAT) > p.close_price THEN 1
-                WHEN p.predicted_signal LIKE '%Sell%' AND CAST(future.close_price AS FLOAT) < p.close_price THEN 1
+                WHEN p.predicted_signal LIKE '%Buy%' AND CAST(future.close_price_5d AS FLOAT) > p.close_price THEN 1
+                WHEN p.predicted_signal LIKE '%Sell%' AND CAST(future.close_price_5d AS FLOAT) < p.close_price THEN 1
                 ELSE 0
             END,
             p.updated_at = GETDATE()
         FROM ml_trading_predictions p
         INNER JOIN (
-            SELECT ticker, trading_date, close_price,
-                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date) as rn
-            FROM nasdaq_100_hist_data
-        ) future ON future.ticker = p.ticker
-        INNER JOIN (
             SELECT ticker, trading_date,
-                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date) as rn
+                   LEAD(close_price, 5) OVER (PARTITION BY ticker ORDER BY trading_date) as close_price_5d
             FROM nasdaq_100_hist_data
-        ) base ON base.ticker = p.ticker AND base.trading_date = p.trading_date
+        ) future ON future.ticker = p.ticker AND future.trading_date = p.trading_date
         WHERE p.actual_return_5d IS NULL
-          AND future.rn = base.rn + 5
+          AND future.close_price_5d IS NOT NULL
     """)
     updated_5d = cursor.rowcount
     conn.commit()
@@ -134,21 +129,16 @@ def backfill_nasdaq_predictions(conn):
     cursor.execute("""
         UPDATE p
         SET 
-            p.actual_return_10d = ((CAST(future.close_price AS FLOAT) - p.close_price) / p.close_price) * 100,
+            p.actual_return_10d = ((CAST(future.close_price_10d AS FLOAT) - p.close_price) / p.close_price) * 100,
             p.updated_at = GETDATE()
         FROM ml_trading_predictions p
         INNER JOIN (
-            SELECT ticker, trading_date, close_price,
-                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date) as rn
-            FROM nasdaq_100_hist_data
-        ) future ON future.ticker = p.ticker
-        INNER JOIN (
             SELECT ticker, trading_date,
-                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date) as rn
+                   LEAD(close_price, 10) OVER (PARTITION BY ticker ORDER BY trading_date) as close_price_10d
             FROM nasdaq_100_hist_data
-        ) base ON base.ticker = p.ticker AND base.trading_date = p.trading_date
+        ) future ON future.ticker = p.ticker AND future.trading_date = p.trading_date
         WHERE p.actual_return_10d IS NULL
-          AND future.rn = base.rn + 10
+          AND future.close_price_10d IS NOT NULL
     """)
     updated_10d = cursor.rowcount
     conn.commit()
@@ -218,26 +208,21 @@ def backfill_nse_predictions(conn):
     cursor.execute("""
         UPDATE p
         SET 
-            p.actual_return_5d = ((CAST(future.close_price AS FLOAT) - p.close_price) / p.close_price) * 100,
+            p.actual_return_5d = ((CAST(future.close_price_5d AS FLOAT) - p.close_price) / p.close_price) * 100,
             p.direction_correct_5d = CASE 
-                WHEN p.predicted_signal = 'Buy' AND CAST(future.close_price AS FLOAT) > p.close_price THEN 1
-                WHEN p.predicted_signal = 'Sell' AND CAST(future.close_price AS FLOAT) < p.close_price THEN 1
+                WHEN p.predicted_signal = 'Buy' AND CAST(future.close_price_5d AS FLOAT) > p.close_price THEN 1
+                WHEN p.predicted_signal = 'Sell' AND CAST(future.close_price_5d AS FLOAT) < p.close_price THEN 1
                 ELSE 0
             END,
             p.updated_at = GETDATE()
         FROM ml_nse_trading_predictions p
         INNER JOIN (
-            SELECT ticker, trading_date, close_price,
-                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date) as rn
-            FROM nse_500_hist_data
-        ) future ON future.ticker = p.ticker
-        INNER JOIN (
             SELECT ticker, trading_date,
-                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date) as rn
+                   LEAD(close_price, 5) OVER (PARTITION BY ticker ORDER BY trading_date) as close_price_5d
             FROM nse_500_hist_data
-        ) base ON base.ticker = p.ticker AND base.trading_date = p.trading_date
+        ) future ON future.ticker = p.ticker AND future.trading_date = p.trading_date
         WHERE p.actual_return_5d IS NULL
-          AND future.rn = base.rn + 5
+          AND future.close_price_5d IS NOT NULL
     """)
     updated_5d = cursor.rowcount
     conn.commit()
@@ -248,21 +233,16 @@ def backfill_nse_predictions(conn):
     cursor.execute("""
         UPDATE p
         SET 
-            p.actual_return_10d = ((CAST(future.close_price AS FLOAT) - p.close_price) / p.close_price) * 100,
+            p.actual_return_10d = ((CAST(future.close_price_10d AS FLOAT) - p.close_price) / p.close_price) * 100,
             p.updated_at = GETDATE()
         FROM ml_nse_trading_predictions p
         INNER JOIN (
-            SELECT ticker, trading_date, close_price,
-                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date) as rn
-            FROM nse_500_hist_data
-        ) future ON future.ticker = p.ticker
-        INNER JOIN (
             SELECT ticker, trading_date,
-                   ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date) as rn
+                   LEAD(close_price, 10) OVER (PARTITION BY ticker ORDER BY trading_date) as close_price_10d
             FROM nse_500_hist_data
-        ) base ON base.ticker = p.ticker AND base.trading_date = p.trading_date
+        ) future ON future.ticker = p.ticker AND future.trading_date = p.trading_date
         WHERE p.actual_return_10d IS NULL
-          AND future.rn = base.rn + 10
+          AND future.close_price_10d IS NOT NULL
     """)
     updated_10d = cursor.rowcount
     conn.commit()
@@ -337,28 +317,23 @@ def backfill_forex_predictions(conn):
     cursor.execute("""
         UPDATE p
         SET 
-            p.actual_return_5d = ((CAST(future.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT)) * 100,
+            p.actual_return_5d = ((CAST(future.close_price_5d AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT)) * 100,
             p.direction_correct_5d = CASE 
-                WHEN p.predicted_signal = 'BUY' AND CAST(future.close_price AS FLOAT) > CAST(p.close_price AS FLOAT) THEN 1
-                WHEN p.predicted_signal = 'SELL' AND CAST(future.close_price AS FLOAT) < CAST(p.close_price AS FLOAT) THEN 1
-                WHEN p.predicted_signal = 'HOLD' AND ABS(CAST(future.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT) < 0.01 THEN 1
+                WHEN p.predicted_signal = 'BUY' AND CAST(future.close_price_5d AS FLOAT) > CAST(p.close_price AS FLOAT) THEN 1
+                WHEN p.predicted_signal = 'SELL' AND CAST(future.close_price_5d AS FLOAT) < CAST(p.close_price AS FLOAT) THEN 1
+                WHEN p.predicted_signal = 'HOLD' AND ABS(CAST(future.close_price_5d AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT) < 0.01 THEN 1
                 ELSE 0
             END,
             p.updated_at = GETDATE()
         FROM forex_ml_predictions p
         INNER JOIN (
-            SELECT symbol, trading_date, close_price,
-                   ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trading_date) as rn
-            FROM forex_hist_data
-        ) future ON future.symbol = p.currency_pair
-        INNER JOIN (
             SELECT symbol, trading_date,
-                   ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trading_date) as rn
+                   LEAD(close_price, 5) OVER (PARTITION BY symbol ORDER BY trading_date) as close_price_5d
             FROM forex_hist_data
-        ) base ON base.symbol = p.currency_pair AND base.trading_date = CAST(p.prediction_date AS date)
+        ) future ON future.symbol = p.currency_pair AND future.trading_date = CAST(p.prediction_date AS date)
         WHERE p.actual_return_5d IS NULL
           AND p.close_price IS NOT NULL AND p.close_price > 0
-          AND future.rn = base.rn + 5
+          AND future.close_price_5d IS NOT NULL
     """)
     updated_5d = cursor.rowcount
     conn.commit()
@@ -369,22 +344,17 @@ def backfill_forex_predictions(conn):
     cursor.execute("""
         UPDATE p
         SET 
-            p.actual_return_10d = ((CAST(future.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT)) * 100,
+            p.actual_return_10d = ((CAST(future.close_price_10d AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT)) * 100,
             p.updated_at = GETDATE()
         FROM forex_ml_predictions p
         INNER JOIN (
-            SELECT symbol, trading_date, close_price,
-                   ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trading_date) as rn
-            FROM forex_hist_data
-        ) future ON future.symbol = p.currency_pair
-        INNER JOIN (
             SELECT symbol, trading_date,
-                   ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trading_date) as rn
+                   LEAD(close_price, 10) OVER (PARTITION BY symbol ORDER BY trading_date) as close_price_10d
             FROM forex_hist_data
-        ) base ON base.symbol = p.currency_pair AND base.trading_date = CAST(p.prediction_date AS date)
+        ) future ON future.symbol = p.currency_pair AND future.trading_date = CAST(p.prediction_date AS date)
         WHERE p.actual_return_10d IS NULL
           AND p.close_price IS NOT NULL AND p.close_price > 0
-          AND future.rn = base.rn + 10
+          AND future.close_price_10d IS NOT NULL
     """)
     updated_10d = cursor.rowcount
     conn.commit()
