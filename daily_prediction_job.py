@@ -269,26 +269,31 @@ def get_top_stocks(conn, market, limit=50):
 
 def bulk_load_stock_data(conn, market, tickers):
     """
-    BULK load historical data for ALL tickers in one market with ONE query.
+    BULK load historical data for ALL tickers in one market.
     Returns dict: {ticker: DataFrame}.
     
-    This replaces 256+ individual queries with 1 query.
+    Batches queries in chunks of 2000 to stay under SQL Server's 2100 parameter limit.
     """
     config = MARKETS[market]
-    
-    # Build parameterized IN clause
-    placeholders = ','.join(['?' for _ in tickers])
-    query = f"""
-    SELECT {config['symbol_col']} as ticker, trading_date, close_price, volume, high_price, low_price
-    FROM {config['table']}
-    WHERE {config['symbol_col']} IN ({placeholders})
-      AND trading_date >= DATEADD(day, -1100, GETDATE())
-    ORDER BY {config['symbol_col']}, trading_date ASC
-    """
+    BATCH_SIZE = 2000  # SQL Server max parameters is 2100
     
     log_message(f"  Bulk loading data for {len(tickers)} tickers...")
     load_start = datetime.now()
-    df_all = pd.read_sql(query, conn, params=tickers)
+    
+    frames = []
+    for i in range(0, len(tickers), BATCH_SIZE):
+        batch = tickers[i:i + BATCH_SIZE]
+        placeholders = ','.join(['?' for _ in batch])
+        query = f"""
+        SELECT {config['symbol_col']} as ticker, trading_date, close_price, volume, high_price, low_price
+        FROM {config['table']}
+        WHERE {config['symbol_col']} IN ({placeholders})
+          AND trading_date >= DATEADD(day, -1100, GETDATE())
+        ORDER BY {config['symbol_col']}, trading_date ASC
+        """
+        frames.append(pd.read_sql(query, conn, params=batch))
+    
+    df_all = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     load_elapsed = (datetime.now() - load_start).total_seconds()
     log_message(f"  Loaded {len(df_all):,} rows in {load_elapsed:.1f}s")
     
@@ -314,15 +319,21 @@ def bulk_load_rsi_data(conn, market, tickers):
     config = MARKETS[market]
     rsi_table = config['rsi_table']
     rsi_col = config['rsi_col']
+    BATCH_SIZE = 2000  # SQL Server max parameters is 2100
     
-    placeholders = ','.join(['?' for _ in tickers])
-    query = f"""
-    SELECT {rsi_col} as ticker, trading_date, RSI
-    FROM dbo.{rsi_table}
-    WHERE {rsi_col} IN ({placeholders})
-    ORDER BY {rsi_col}, trading_date ASC
-    """
-    df_all = pd.read_sql(query, conn, params=tickers)
+    frames = []
+    for i in range(0, len(tickers), BATCH_SIZE):
+        batch = tickers[i:i + BATCH_SIZE]
+        placeholders = ','.join(['?' for _ in batch])
+        query = f"""
+        SELECT {rsi_col} as ticker, trading_date, RSI
+        FROM dbo.{rsi_table}
+        WHERE {rsi_col} IN ({placeholders})
+        ORDER BY {rsi_col}, trading_date ASC
+        """
+        frames.append(pd.read_sql(query, conn, params=batch))
+    
+    df_all = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     
     rsi_by_ticker = {}
     for ticker in tickers:
@@ -701,18 +712,23 @@ def update_actual_prices(conn):
         
         # Update actual prices using batch SQL with JOIN
         # Uses trading_date <= target_date to find the closest available price
+        # Guards: NULLIF prevents division by zero; capped squared_error avoids numeric overflow
         update_sql = f"""
         UPDATE p
         SET 
             p.actual_price = CAST(h.close_price AS FLOAT),
-            p.actual_change_pct = ((CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT)) * 100,
+            p.actual_change_pct = CASE WHEN CAST(p.current_price AS FLOAT) = 0 THEN NULL
+                ELSE ((CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT)) * 100 END,
             p.absolute_error = ABS(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT)),
-            p.squared_error = POWER(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT), 2),
-            p.percentage_error = ABS(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT)) / CAST(h.close_price AS FLOAT) * 100,
+            p.squared_error = CASE 
+                WHEN ABS(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT)) > 1000000 THEN 999999999999
+                ELSE POWER(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT), 2) END,
+            p.percentage_error = CASE WHEN CAST(h.close_price AS FLOAT) = 0 THEN NULL
+                ELSE ABS(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT)) / CAST(h.close_price AS FLOAT) * 100 END,
             p.direction_correct = CASE 
                 WHEN p.predicted_change_pct > 0.01 AND CAST(h.close_price AS FLOAT) > CAST(p.current_price AS FLOAT) THEN 1
                 WHEN p.predicted_change_pct < -0.01 AND CAST(h.close_price AS FLOAT) < CAST(p.current_price AS FLOAT) THEN 1
-                WHEN ABS(p.predicted_change_pct) <= 0.01 AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT) < 0.005 THEN 1
+                WHEN ABS(p.predicted_change_pct) <= 0.01 AND CAST(p.current_price AS FLOAT) != 0 AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT) < 0.005 THEN 1
                 ELSE 0
             END,
             p.updated_at = GETDATE()
@@ -722,6 +738,7 @@ def update_actual_prices(conn):
             FROM {table}
             WHERE {symbol_col} = p.ticker 
               AND trading_date <= p.target_date
+              AND close_price IS NOT NULL AND close_price > 0
             ORDER BY trading_date DESC
         ) h
         WHERE p.market = ?
