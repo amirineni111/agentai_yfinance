@@ -272,10 +272,10 @@ def bulk_load_stock_data(conn, market, tickers):
     BULK load historical data for ALL tickers in one market.
     Returns dict: {ticker: DataFrame}.
     
-    Batches queries in chunks of 2000 to stay under SQL Server's 2100 parameter limit.
+    Batches queries in chunks of 1500 to stay safely under SQL Server's 2100 parameter limit.
     """
     config = MARKETS[market]
-    BATCH_SIZE = 2000  # SQL Server max parameters is 2100
+    BATCH_SIZE = 1500  # SQL Server max parameters is 2100; keep ample margin
     
     log_message(f"  Bulk loading data for {len(tickers)} tickers...")
     load_start = datetime.now()
@@ -288,7 +288,7 @@ def bulk_load_stock_data(conn, market, tickers):
         SELECT {config['symbol_col']} as ticker, trading_date, close_price, volume, high_price, low_price
         FROM {config['table']}
         WHERE {config['symbol_col']} IN ({placeholders})
-          AND trading_date >= DATEADD(day, -1100, GETDATE())
+          AND trading_date >= DATEADD(day, -400, GETDATE())
         ORDER BY {config['symbol_col']}, trading_date ASC
         """
         frames.append(pd.read_sql(query, conn, params=batch))
@@ -297,18 +297,20 @@ def bulk_load_stock_data(conn, market, tickers):
     load_elapsed = (datetime.now() - load_start).total_seconds()
     log_message(f"  Loaded {len(df_all):,} rows in {load_elapsed:.1f}s")
     
-    # Split into per-ticker DataFrames
+    # Split into per-ticker DataFrames using groupby (O(n) vs O(n*m))
+    split_start = datetime.now()
     stock_data = {}
-    for ticker in tickers:
-        df = df_all[df_all['ticker'] == ticker].copy()
-        df = df.drop(columns=['ticker'])
-        df = df.sort_values('trading_date').reset_index(drop=True)
-        
-        if len(df) >= MIN_DATA_POINTS:
-            # Keep only the most recent 1000 rows (same as original)
-            if len(df) > 1000:
-                df = df.tail(1000).reset_index(drop=True)
-            stock_data[ticker] = df
+    if not df_all.empty:
+        df_all = df_all.sort_values(['ticker', 'trading_date'])
+        for ticker, group in df_all.groupby('ticker'):
+            df = group.drop(columns=['ticker']).reset_index(drop=True)
+            if len(df) >= MIN_DATA_POINTS:
+                if len(df) > 1000:
+                    df = df.tail(1000).reset_index(drop=True)
+                stock_data[ticker] = df
+    
+    split_elapsed = (datetime.now() - split_start).total_seconds()
+    log_message(f"  Split into {len(stock_data)} ticker DataFrames in {split_elapsed:.1f}s")
     
     return stock_data
 
@@ -319,7 +321,10 @@ def bulk_load_rsi_data(conn, market, tickers):
     config = MARKETS[market]
     rsi_table = config['rsi_table']
     rsi_col = config['rsi_col']
-    BATCH_SIZE = 2000  # SQL Server max parameters is 2100
+    BATCH_SIZE = 1500  # SQL Server max parameters is 2100; keep ample margin
+    
+    log_message(f"  Bulk loading RSI for {len(tickers)} tickers...")
+    rsi_start = datetime.now()
     
     frames = []
     for i in range(0, len(tickers), BATCH_SIZE):
@@ -329,17 +334,20 @@ def bulk_load_rsi_data(conn, market, tickers):
         SELECT {rsi_col} as ticker, trading_date, RSI
         FROM dbo.{rsi_table}
         WHERE {rsi_col} IN ({placeholders})
+          AND trading_date >= DATEADD(day, -400, GETDATE())
         ORDER BY {rsi_col}, trading_date ASC
         """
         frames.append(pd.read_sql(query, conn, params=batch))
     
     df_all = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    rsi_elapsed = (datetime.now() - rsi_start).total_seconds()
+    log_message(f"  RSI query returned {len(df_all):,} rows in {rsi_elapsed:.1f}s")
     
+    # Use groupby instead of repeated boolean indexing (O(n) vs O(n*m))
     rsi_by_ticker = {}
-    for ticker in tickers:
-        rsi_df = df_all[df_all['ticker'] == ticker][['trading_date', 'RSI']].copy()
-        if not rsi_df.empty:
-            rsi_by_ticker[ticker] = rsi_df
+    if not df_all.empty:
+        for ticker, group in df_all.groupby('ticker'):
+            rsi_by_ticker[ticker] = group[['trading_date', 'RSI']].copy()
     
     return rsi_by_ticker
 
@@ -417,17 +425,11 @@ def calculate_technical_indicators(df, rsi_df=None):
     # 11. hl_range — intraday volatility (normalized)
     df['hl_range'] = (df['high_price'] - df['low_price']) / df['close_price']
     
-    # 12. trend_strength — ADX-like indicator
-    close_values = df['close_price'].values
-    trend_strength = np.full(len(close_values), np.nan)
-    for i in range(13, len(close_values)):
-        window = close_values[i-13:i+1]
-        std = np.std(window)
-        if std > 0:
-            trend_strength[i] = abs(window[-1] - window[0]) / std
-        else:
-            trend_strength[i] = 0
-    df['trend_strength'] = trend_strength
+    # 12. trend_strength — ADX-like indicator (vectorized)
+    close_series = df['close_price']
+    rolling_std = close_series.rolling(14).std()
+    abs_change = (close_series - close_series.shift(13)).abs()
+    df['trend_strength'] = np.where(rolling_std > 0, abs_change / rolling_std, 0)
     
     # 13. regime_vol_ratio — short-term vol vs long-term vol
     vol_short = df['close_price'].pct_change().rolling(10).std()
@@ -630,8 +632,8 @@ def pool_market_data(all_stock_data, rsi_by_ticker=None):
         if len(df) < MIN_DATA_POINTS:
             continue
         
-        # Save latest row for this ticker (for prediction after training)
-        ticker_latest[ticker] = df.copy()
+        # Save only the latest rows needed for prediction (not full copy)
+        ticker_latest[ticker] = df
         
         # Add ticker column (excluded from features but used for grouping)
         df['ticker'] = ticker
@@ -646,25 +648,45 @@ def pool_market_data(all_stock_data, rsi_by_ticker=None):
     
     return market_df, ticker_latest
 
+def load_existing_predictions(cursor, market):
+    """
+    BULK preload today's existing predictions for a market in ONE query.
+    Returns a set of (ticker, days_ahead, model_name) tuples for fast duplicate checking.
+    Replaces ~2250 individual SELECT COUNT(*) queries per market.
+    """
+    prediction_date = datetime.now().date()
+    cursor.execute("""
+        SELECT ticker, days_ahead, model_name
+        FROM ai_prediction_history
+        WHERE market = ? AND prediction_date = ?
+    """, (market, str(prediction_date)))
+    return {(row[0], row[1], row[2]) for row in cursor.fetchall()}
+
+
 def store_prediction(cursor, market, ticker, company_name, days_ahead, model_name, 
-                    current_price, predicted_change, confidence):
+                    current_price, predicted_change, confidence, existing_predictions=None):
     """
     Store prediction in database. 
     Skips if a prediction already exists for this market/ticker/date/days_ahead/model.
-    Uses the cursor passed from the main function (no separate commit -- batched).
+    Uses pre-loaded existing_predictions set for O(1) duplicate check instead of per-row SQL.
     """
     prediction_date = datetime.now().date()
     target_date = prediction_date + timedelta(days=days_ahead)
     predicted_price = current_price * (1 + predicted_change)
     
-    # Check for duplicate before inserting
-    dup_check = """
-    SELECT COUNT(*) FROM ai_prediction_history 
-    WHERE market = ? AND ticker = ? AND prediction_date = ? AND days_ahead = ? AND model_name = ?
-    """
-    cursor.execute(dup_check, (market, ticker, str(prediction_date), days_ahead, model_name))
-    if cursor.fetchone()[0] > 0:
-        return False  # Duplicate, skip
+    # Fast in-memory duplicate check using pre-loaded set
+    if existing_predictions is not None:
+        if (ticker, days_ahead, model_name) in existing_predictions:
+            return False  # Duplicate, skip
+    else:
+        # Fallback: individual SQL check (shouldn't happen in normal flow)
+        dup_check = """
+        SELECT COUNT(*) FROM ai_prediction_history 
+        WHERE market = ? AND ticker = ? AND prediction_date = ? AND days_ahead = ? AND model_name = ?
+        """
+        cursor.execute(dup_check, (market, ticker, str(prediction_date), days_ahead, model_name))
+        if cursor.fetchone()[0] > 0:
+            return False
     
     query = """
     INSERT INTO ai_prediction_history 
@@ -738,7 +760,7 @@ def update_actual_prices(conn):
             FROM {table}
             WHERE {symbol_col} = p.ticker 
               AND trading_date <= p.target_date
-              AND close_price IS NOT NULL AND close_price > 0
+              AND close_price IS NOT NULL AND CAST(close_price AS FLOAT) > 0
             ORDER BY trading_date DESC
         ) h
         WHERE p.market = ?
@@ -858,6 +880,12 @@ def run_daily_predictions(markets_filter=None):
         
         # Train and predict for each horizon
         market_predictions = 0
+        
+        # Preload today's existing predictions for this market (1 query instead of ~4500)
+        existing_predictions = load_existing_predictions(cursor, market)
+        if existing_predictions:
+            log_message(f"  Found {len(existing_predictions)} existing predictions for today (will skip duplicates)")
+        
         for days_ahead in PREDICTION_DAYS:
             log_message(f"  Training {days_ahead}-day model for {market}...")
             train_start = datetime.now()
@@ -894,7 +922,8 @@ def run_daily_predictions(markets_filter=None):
                     
                     inserted = store_prediction(
                         cursor, market, ticker, company_name, days_ahead, 'Ensemble',
-                        current_price, predicted_change_pct / 100.0, confidence
+                        current_price, predicted_change_pct / 100.0, confidence,
+                        existing_predictions=existing_predictions
                     )
                     if inserted:
                         total_predictions += 1
