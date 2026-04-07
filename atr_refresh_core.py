@@ -28,7 +28,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CONN_STR = (
     'DRIVER={ODBC Driver 17 for SQL Server};'
-    'SERVER=192.168.86.55\\MSSQLSERVER01;'
+    'SERVER=localhost\\MSSQLSERVER01;'
     'DATABASE=stockdata_db;'
     'UID=remote_user;PWD=YourStrongPassword123!;'
     'TrustServerCertificate=Yes;Connect Timeout=30'
