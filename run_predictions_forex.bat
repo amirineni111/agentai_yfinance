@@ -27,7 +27,7 @@ set LOGFILE=%LOGFILE: =0%
 REM Run the prediction job for Forex only
 echo Running Forex prediction job...
 echo Output will be saved to: %LOGFILE%
-python daily_prediction_job.py --market "Forex" > "%LOGFILE%" 2>&1
+"%~dp0venv\Scripts\python.exe" daily_prediction_job.py --market "Forex" > "%LOGFILE%" 2>&1
 
 REM Check if successful
 if %ERRORLEVEL% EQU 0 (

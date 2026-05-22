@@ -26,7 +26,7 @@ set LOGFILE=%LOGFILE: =0%
 REM Run the prediction job for NASDAQ 100 only
 echo Running NASDAQ 100 prediction job...
 echo Output will be saved to: %LOGFILE%
-python daily_prediction_job.py --market "NASDAQ 100" > "%LOGFILE%" 2>&1
+"%~dp0venv\Scripts\python.exe" daily_prediction_job.py --market "NASDAQ 100" > "%LOGFILE%" 2>&1
 
 REM Check if successful
 if %ERRORLEVEL% EQU 0 (

@@ -26,7 +26,7 @@ set LOGFILE=%LOGFILE: =0%
 REM Run the signal tracking job with output to log file
 echo Running signal tracking job...
 echo Output will be saved to: %LOGFILE%
-python daily_signal_tracking_job.py > "%LOGFILE%" 2>&1
+"%~dp0venv\Scripts\python.exe" daily_signal_tracking_job.py > "%LOGFILE%" 2>&1
 
 REM Check if successful
 if %ERRORLEVEL% EQU 0 (
