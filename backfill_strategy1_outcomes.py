@@ -46,6 +46,62 @@ def log_message(message, level="INFO"):
 
 
 # =====================================================
+# PHASE 2 FIX: Nullify anomalous returns before re-backfilling
+# Root cause: p.close_price may be stale on days with corporate actions
+# (splits, bonuses) causing denominators that produce |return| > 25%.
+# NSE circuit breaker max is ±20%/day; anything beyond ±25% is invalid.
+# =====================================================
+
+def nullify_anomalous_returns(conn):
+    """
+    NULL out actual_return_1d values where |return| > 25% across all three
+    Strategy 1 prediction tables.  After nullifying, the backfill functions
+    re-fill those rows with the ±25% guard applied.  If the underlying price
+    data is still wrong, the guard keeps them NULL so they can be reviewed.
+    """
+    log_message("=" * 60)
+    log_message("Nullifying anomalous 1-day returns (|return| > 25%)")
+    log_message("=" * 60)
+
+    cursor = conn.cursor()
+    tables = [
+        ("NASDAQ 100", "ml_trading_predictions"),
+        ("NSE 500",    "ml_nse_trading_predictions"),
+        ("FOREX",      "forex_ml_predictions"),
+    ]
+
+    total_nullified = 0
+    for label, table in tables:
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM {table}
+            WHERE actual_return_1d IS NOT NULL AND ABS(actual_return_1d) > 25
+        """)
+        anomalous = cursor.fetchone()[0]
+
+        if anomalous == 0:
+            log_message(f"  {label}: No anomalous 1d returns found")
+            continue
+
+        log_message(f"  {label}: {anomalous} records with |actual_return_1d| > 25% -- nullifying...")
+        cursor.execute(f"""
+            UPDATE {table}
+            SET actual_return_1d  = NULL,
+                direction_correct_1d = NULL,
+                prediction_accuracy  = 'Pending',
+                updated_at           = GETDATE()
+            WHERE actual_return_1d IS NOT NULL AND ABS(actual_return_1d) > 25
+        """)
+        nullified = cursor.rowcount
+        total_nullified += nullified
+        log_message(f"  {label}: Nullified {nullified} anomalous records")
+
+    conn.commit()
+    log_message(f"Total nullified: {total_nullified} records across all markets")
+    if total_nullified > 0:
+        log_message("Re-backfill will now apply the +-25% guard on all writes.")
+
+
+# =====================================================
 # NASDAQ 100: ml_trading_predictions
 # =====================================================
 
@@ -76,7 +132,12 @@ def backfill_nasdaq_predictions(conn):
     cursor.execute("""
         UPDATE p
         SET 
-            p.actual_return_1d = ((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100,
+            -- Guard: reject |return| > 25% (NSE/NASDAQ circuit limits ~20%)
+            p.actual_return_1d = CASE
+                WHEN NULLIF(p.close_price, 0) IS NULL THEN NULL
+                WHEN ABS(((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100) > 25 THEN NULL
+                ELSE ((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100
+            END,
             p.direction_correct_1d = CASE 
                 WHEN p.predicted_signal LIKE '%Buy%' AND CAST(h.close_price AS FLOAT) > p.close_price THEN 1
                 WHEN p.predicted_signal LIKE '%Sell%' AND CAST(h.close_price AS FLOAT) < p.close_price THEN 1
@@ -180,7 +241,12 @@ def backfill_nse_predictions(conn):
     cursor.execute("""
         UPDATE p
         SET 
-            p.actual_return_1d = ((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100,
+            -- Guard: reject |return| > 25% (NSE circuit breaker max ~20%/day)
+            p.actual_return_1d = CASE
+                WHEN NULLIF(p.close_price, 0) IS NULL THEN NULL
+                WHEN ABS(((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100) > 25 THEN NULL
+                ELSE ((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100
+            END,
             p.direction_correct_1d = CASE 
                 WHEN p.predicted_signal = 'Buy' AND CAST(h.close_price AS FLOAT) > p.close_price THEN 1
                 WHEN p.predicted_signal = 'Sell' AND CAST(h.close_price AS FLOAT) < p.close_price THEN 1
@@ -286,7 +352,12 @@ def backfill_forex_predictions(conn):
     cursor.execute("""
         UPDATE p
         SET 
-            p.actual_return_1d = ((CAST(h.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT)) * 100,
+            -- Guard: reject |return| > 25% (Forex pip moves rarely exceed 5-8%/day)
+            p.actual_return_1d = CASE
+                WHEN NULLIF(CAST(p.close_price AS FLOAT), 0) IS NULL THEN NULL
+                WHEN ABS(((CAST(h.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT)) * 100) > 25 THEN NULL
+                ELSE ((CAST(h.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT)) * 100
+            END,
             p.direction_correct_1d = CASE 
                 WHEN p.predicted_signal = 'BUY' AND CAST(h.close_price AS FLOAT) > CAST(p.close_price AS FLOAT) THEN 1
                 WHEN p.predicted_signal = 'SELL' AND CAST(h.close_price AS FLOAT) < CAST(p.close_price AS FLOAT) THEN 1
@@ -443,6 +514,7 @@ def run_strategy1_backfill():
     conn = get_db_connection()
     
     try:
+        nullify_anomalous_returns(conn)    # Pass 1: null out bad rows before re-filling
         backfill_nasdaq_predictions(conn)
         backfill_nse_predictions(conn)
         backfill_forex_predictions(conn)

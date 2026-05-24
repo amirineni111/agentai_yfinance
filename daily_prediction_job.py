@@ -85,6 +85,27 @@ MIN_DIRECTION_ACCURACY = 0.45  # Skip models with < 45% direction accuracy
 HISTORICAL_LOOKBACK_DAYS = 90  # Look back 90 days for performance analysis
 
 # =====================================================
+# RETIRED MODEL REGISTRY (Phase 5)
+# These models ran until Feb 12, 2026 when the LGB+LR Ensemble took over.
+# Excluded from active learning history to prevent skewing current Ensemble.
+# =====================================================
+RETIRED_MODELS = {
+    'Linear Regression':    {'retired_date': '2026-02-12', 'superseded_by': 'Ensemble (LGB+LR)'},
+    'Gradient Boosting':    {'retired_date': '2026-02-12', 'superseded_by': 'Ensemble (LGB+LR)'},
+    'Random Forest':        {'retired_date': '2026-02-12', 'superseded_by': 'Ensemble (LGB+LR)'},
+    'ExtraTreesClassifier': {'retired_date': '2026-02-12', 'superseded_by': 'Ensemble (LGB+LR)'},
+}
+
+# =====================================================
+# 3-CLASS CLASSIFICATION THRESHOLDS (Phase 4C)
+# Returns within these thresholds are labelled FLAT (class=1).
+# 7-day: 1.5% is roughly 1 ATR for large-caps over a week.
+# 3-day: 0.8% threshold is tighter (less noise in shorter window).
+# =====================================================
+FLAT_THRESHOLD_7D = 0.015   # ±1.5% for 7-day horizon
+FLAT_THRESHOLD_3D = 0.008   # ±0.8% for 3-day horizon
+
+# =====================================================
 # WATCHLIST CONFIGURATION
 # =====================================================
 USE_WATCHLIST = False  # Set to True to use watchlist, False for all tickers
@@ -114,6 +135,8 @@ SELECTED_FEATURES_V4 = [
     'hl_range',              # Intraday volatility
     'week52_position',       # 52-week high/low position (strong breakout signal)
     'rel_strength',          # Return vs market index (relative momentum)
+    'index_return_20d',      # 20-day cumulative index return (regime signal: +ve=bull, -ve=bear)
+    'sector_momentum',       # Mean 20-day return of sector peers (cross-sectional momentum)
     'sector_sentiment',      # SENTIMENT: Composite score from SQL Server sentiment tables
     'sector_finbert',        # SENTIMENT: FinBERT financial NLP score
     'sentiment_momentum_3d', # SENTIMENT: 3-day sentiment trend
@@ -242,6 +265,10 @@ def bulk_load_performance_history(conn, market):
       AND prediction_date >= ?
       AND actual_price IS NOT NULL
       AND direction_correct IS NOT NULL
+      AND model_name NOT IN (
+          'Linear Regression', 'Gradient Boosting',
+          'Random Forest', 'ExtraTreesClassifier'
+      )
     GROUP BY ticker, days_ahead, model_name
     HAVING COUNT(*) >= ?
     """
@@ -522,6 +549,8 @@ def calculate_technical_indicators_v4(df, rsi_df=None, market_index_returns=None
 
     # 11. rel_strength — stock return vs market index (FIX 4)
     #     Stocks outperforming their index tend to continue outperforming
+    # 12. index_return_20d — 20-day cumulative index return (Phase 4A regime signal)
+    #     Positive = bull regime; negative = bear regime. Helps model learn regime-conditional patterns.
     if market_index_returns is not None and not market_index_returns.empty:
         idx_df = pd.DataFrame({
             'trading_date': market_index_returns.index,
@@ -531,9 +560,12 @@ def calculate_technical_indicators_v4(df, rsi_df=None, market_index_returns=None
         df['index_return'] = df['index_return'].fillna(0)
         df['rel_strength'] = df['returns'].rolling(20).mean() - \
                              df['index_return'].rolling(20).mean()
+        # 20-day cumulative index return: sum of daily returns ≈ log-return over window
+        df['index_return_20d'] = df['index_return'].rolling(20).sum()
         df.drop(columns=['index_return'], inplace=True)
     else:
-        df['rel_strength'] = 0.0  # Neutral — no index data provided
+        df['rel_strength']    = 0.0  # Neutral — no index data provided
+        df['index_return_20d'] = 0.0  # Neutral — no index data
 
     return df.dropna()
 
@@ -553,9 +585,13 @@ def train_sector_model(sector_df, days_ahead):
     """
     df = sector_df.copy()
 
-    # Classification target: 1 = UP in N days, 0 = DOWN
-    df['target'] = (df['close_price'].shift(-days_ahead) > df['close_price']).astype(int)
+    # 3-class classification target: 2=UP, 1=FLAT, 0=DOWN (Phase 4C)
+    flat_threshold = FLAT_THRESHOLD_7D if days_ahead >= 7 else FLAT_THRESHOLD_3D
+    future_ret = df['close_price'].shift(-days_ahead) / df['close_price'].replace(0, np.nan) - 1
+    df['target'] = np.where(future_ret > flat_threshold, 2,
+                   np.where(future_ret < -flat_threshold, 0, 1))
     df = df.dropna(subset=['target'])
+    df['target'] = df['target'].astype(int)
 
     if len(df) < MIN_SECTOR_SAMPLES:
         log_message(f"    [{days_ahead}d] Insufficient sector data ({len(df)} < {MIN_SECTOR_SAMPLES}), skipping", "WARNING")
@@ -583,6 +619,8 @@ def train_sector_model(sector_df, days_ahead):
     window_size = max(80, (n_samples - min_train) // (n_windows + 1))
 
     wf_direction_scores = []
+    lgb_wf_scores = []   # Per-model scores for dynamic weighting (Phase 3)
+    lr_wf_scores  = []
 
     for w in range(n_windows):
         train_end = min_train + w * window_size
@@ -602,17 +640,18 @@ def train_sector_model(sector_df, days_ahead):
         wf_X_train_s = scaler_wf.fit_transform(wf_X_train)
         wf_X_test_s = scaler_wf.transform(wf_X_test)
 
-        # FIX 2: LightGBM with is_unbalance=True
+        # FIX 2: LightGBM with class_weight='balanced' (3-class; is_unbalance only works for binary)
         try:
             lgb_wf = lgb.LGBMClassifier(
                 n_estimators=200, learning_rate=0.05, max_depth=6,
                 num_leaves=31, min_child_samples=20, subsample=0.8,
                 colsample_bytree=0.8, reg_alpha=0.1, reg_lambda=0.1,
-                is_unbalance=True,   # FIX 2
+                class_weight='balanced',   # Phase 4C: replaces is_unbalance for 3-class
                 random_state=42, verbosity=-1, n_jobs=-1
             )
             lgb_wf.fit(wf_X_train_s, wf_y_train, sample_weight=wf_weights)
             lgb_acc = np.mean(lgb_wf.predict(wf_X_test_s) == wf_y_test)
+            lgb_wf_scores.append(lgb_acc)
             wf_direction_scores.append(lgb_acc)
         except Exception as e:
             log_message(f"    LGB WF error: {e}", "WARNING")
@@ -621,11 +660,20 @@ def train_sector_model(sector_df, days_ahead):
             lr_wf = LogisticRegression(C=0.1, max_iter=500, class_weight='balanced', random_state=42)
             lr_wf.fit(wf_X_train_s, wf_y_train, sample_weight=wf_weights)
             lr_acc = np.mean(lr_wf.predict(wf_X_test_s) == wf_y_test)
+            lr_wf_scores.append(lr_acc)
             wf_direction_scores.append(lr_acc)
         except Exception as e:
             log_message(f"    LR WF error: {e}", "WARNING")
 
     wf_accuracy = np.mean(wf_direction_scores) * 100 if wf_direction_scores else 50.0
+
+    # Compute dynamic ensemble weights from per-model walk-forward accuracy (Phase 3)
+    # Each model's weight = its WF accuracy share, clamped to [0.30, 0.70].
+    lgb_avg = np.mean(lgb_wf_scores) if lgb_wf_scores else 0.60
+    lr_avg  = np.mean(lr_wf_scores)  if lr_wf_scores  else 0.40
+    _total  = lgb_avg + lr_avg
+    lgb_weight = max(0.30, min(0.70, lgb_avg / _total)) if _total > 0 else 0.60
+    lr_weight  = 1.0 - lgb_weight
 
     # Train final models on 80% of data (time-ordered)
     train_end_final = int(n_samples * 0.80)
@@ -639,12 +687,12 @@ def train_sector_model(sector_df, days_ahead):
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # FIX 2: Final LightGBM with is_unbalance=True
+    # FIX 2: Final LightGBM with class_weight='balanced' (3-class)
     lgb_model = lgb.LGBMClassifier(
         n_estimators=200, learning_rate=0.05, max_depth=6,
         num_leaves=31, min_child_samples=20, subsample=0.8,
         colsample_bytree=0.8, reg_alpha=0.1, reg_lambda=0.1,
-        is_unbalance=True,   # FIX 2
+        class_weight='balanced',   # Phase 4C: replaces is_unbalance for 3-class
         random_state=42, verbosity=-1, n_jobs=-1
     )
     lgb_model.fit(X_train_scaled, y_train, sample_weight=weights_train)
@@ -657,50 +705,63 @@ def train_sector_model(sector_df, days_ahead):
 
     log_message(f"    [{days_ahead}d] Trained on {len(X_train):,} samples | "
                 f"WF acc (5-fold): {wf_accuracy:.1f}% | "
-                f"Test: LGB={lgb_test_acc:.1f}%, LR={lr_test_acc:.1f}%")
+                f"Test: LGB={lgb_test_acc:.1f}%, LR={lr_test_acc:.1f}% | "
+                f"Weights: LGB={lgb_weight:.2f}, LR={lr_weight:.2f}")
 
-    return lgb_model, lr_model, scaler, wf_accuracy
+    return lgb_model, lr_model, scaler, wf_accuracy, lgb_weight, lr_weight
 
 
-def predict_for_ticker_v4(ticker_df, lgb_model, lr_model, scaler, wf_accuracy, days_ahead):
+def predict_for_ticker_v4(ticker_df, lgb_model, lr_model, scaler, wf_accuracy, days_ahead,
+                          lgb_weight=0.6, lr_weight=0.4):
     """
     FIX 7: Generate direction prediction for a single ticker (replaces predict_for_ticker).
 
     Changes vs v3:
       FIX 7: Confidence anchored to actual walk-forward accuracy.
-             Old formula gave 55-65% confidence even on 44% accurate models.
-             New formula: WF accuracy below 50% → low confidence (honest scoring).
-      FIX 6: Uses SELECTED_FEATURES_V4 (11 features)
+      FIX 6: Uses SELECTED_FEATURES_V4 (11 + 2 regime features)
+      Phase 3: Dynamic ensemble weights (lgb_weight, lr_weight) from WF per-model scoring.
+      Phase 4C: 3-class output — 0=DOWN, 1=FLAT, 2=UP. Returns predicted_direction string.
 
     Regime check is done in the main loop before calling this function.
 
     Returns:
-        (direction, predicted_change_pct, confidence)
-        or (None, None, None) if prediction not possible
+        (direction, predicted_change_pct, confidence, predicted_direction)
+        or (None, None, None, None) if prediction not possible
     """
     feature_cols = [f for f in SELECTED_FEATURES_V4 if f in ticker_df.columns]
     if len(feature_cols) < 7:
-        return None, None, None
+        return None, None, None, None
 
     latest = ticker_df[feature_cols].iloc[-1:].values
     latest_scaled = scaler.transform(latest)
 
-    # Ensemble: LGB 60% + LR 40%
-    lgb_proba = lgb_model.predict_proba(latest_scaled)[0]
-    lr_proba = lr_model.predict_proba(latest_scaled)[0]
-    avg_proba = 0.6 * lgb_proba + 0.4 * lr_proba
+    # Ensemble: dynamic weights from walk-forward per-model accuracy (Phase 3)
+    lgb_proba = lgb_model.predict_proba(latest_scaled)[0]   # shape: [n_classes]
+    lr_proba  = lr_model.predict_proba(latest_scaled)[0]
+    avg_proba = lgb_weight * lgb_proba + lr_weight * lr_proba
 
-    direction = 1 if avg_proba[1] > 0.5 else 0
-    direction_prob = avg_proba[1] if direction == 1 else avg_proba[0]
+    # 3-class prediction (Phase 4C): 0=DOWN, 1=FLAT, 2=UP
+    predicted_class = int(np.argmax(avg_proba))
+    direction_prob  = float(avg_proba[predicted_class])
+    direction_labels = {0: 'DOWN', 1: 'FLAT', 2: 'UP'}
+    predicted_direction = direction_labels[predicted_class]
+
+    # Binary direction for backward-compat fields (FLAT is treated conservatively as 0/DOWN)
+    direction = 1 if predicted_class == 2 else 0
+
+    # Per-model agreement (based on each model's argmax)
+    lgb_class = int(np.argmax(lgb_proba))
+    lr_class  = int(np.argmax(lr_proba))
+    agree_bonus = 5.0 if lgb_class == lr_class else -5.0
 
     # Magnitude estimate from recent median absolute returns
     recent_returns = ticker_df['close_price'].pct_change(days_ahead).dropna().tail(60)
     median_abs = recent_returns.abs().median() if len(recent_returns) > 10 else 0.02
-    sign = 1.0 if direction == 1 else -1.0
+    sign = 1.0 if predicted_class == 2 else (-1.0 if predicted_class == 0 else 0.0)
     predicted_change_pct = sign * median_abs * 100
 
     # FIX 7: Recalibrated confidence anchored to walk-forward accuracy
-    #   WF=45% → base=30 (worse than random — do not trust)
+    #   WF=45% → base=30 (worse than random)
     #   WF=50% → base=40 (coin flip)
     #   WF=55% → base=53 (some edge)
     #   WF=60% → base=66 (meaningful edge)
@@ -711,18 +772,20 @@ def predict_for_ticker_v4(ticker_df, lgb_model, lr_model, scaler, wf_accuracy, d
     else:
         base_confidence = 40.0 + (wf_accuracy - 52.0) * (35.0 / 13.0)
 
-    # Model probability bonus (only adds value when model is already decent)
-    prob_bonus = (direction_prob - 0.5) * 20   # max +10 at prob=1.0
-
-    # Model agreement bonus
-    lgb_dir = 1 if lgb_proba[1] > 0.5 else 0
-    lr_dir = 1 if lr_proba[1] > 0.5 else 0
-    agree_bonus = 5.0 if lgb_dir == lr_dir else -5.0
+    # Probability bonus: distance of winning class probability from uniform (1/n_classes)
+    n_classes  = len(avg_proba)
+    uniform    = 1.0 / n_classes
+    prob_bonus = (direction_prob - uniform) * 20   # max ~+14 for 3-class
 
     confidence = base_confidence + prob_bonus + agree_bonus
+
+    # FLAT predictions get a confidence cap — harder to call than directional moves
+    if predicted_direction == 'FLAT':
+        confidence = min(confidence, 50.0)
+
     confidence = max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, confidence))
 
-    return direction, predicted_change_pct, confidence
+    return direction, predicted_change_pct, confidence, predicted_direction
 
 
 def get_sector_for_ticker(ticker, market):
@@ -965,6 +1028,29 @@ def pool_sector_data(sector_tickers, all_stock_data, rsi_by_ticker=None,
     sector_df = pd.concat(all_frames, ignore_index=True)
     sector_df = sector_df.sort_values('trading_date').reset_index(drop=True)
 
+    # Phase 4A: sector_momentum — mean 20-day return across all sector tickers per date
+    # Computed cross-sectionally after pooling so all peers are available.
+    sector_df['__close_prev20__'] = sector_df.groupby('ticker')['close_price'].shift(20)
+    sector_df['__ret_20d__'] = (
+        (sector_df['close_price'] - sector_df['__close_prev20__'])
+        / sector_df['__close_prev20__'].replace(0, np.nan)
+    )
+    sector_momentum_df = (
+        sector_df.groupby('trading_date')['__ret_20d__'].mean()
+        .rename('sector_momentum')
+        .reset_index()
+    )
+    sector_df = sector_df.merge(sector_momentum_df, on='trading_date', how='left')
+    sector_df['sector_momentum'] = sector_df['sector_momentum'].ffill().fillna(0.0)
+    sector_df.drop(columns=['__close_prev20__', '__ret_20d__'], inplace=True)
+
+    # Also add sector_momentum into per-ticker prediction DataFrames
+    for ticker in list(ticker_latest.keys()):
+        df = ticker_latest[ticker]
+        df = df.merge(sector_momentum_df, on='trading_date', how='left')
+        df['sector_momentum'] = df['sector_momentum'].ffill().fillna(0.0)
+        ticker_latest[ticker] = df
+
     return sector_df, ticker_latest
 
 def load_existing_predictions(cursor, market):
@@ -983,11 +1069,13 @@ def load_existing_predictions(cursor, market):
 
 
 def store_prediction(cursor, market, ticker, company_name, days_ahead, model_name, 
-                    current_price, predicted_change, confidence, existing_predictions=None):
+                    current_price, predicted_change, confidence, existing_predictions=None,
+                    predicted_direction=None):
     """
     Store prediction in database. 
     Skips if a prediction already exists for this market/ticker/date/days_ahead/model.
     Uses pre-loaded existing_predictions set for O(1) duplicate check instead of per-row SQL.
+    Phase 4C: Writes predicted_direction (UP/FLAT/DOWN) when provided.
     """
     prediction_date = datetime.now().date()
     target_date = prediction_date + timedelta(days=days_ahead)
@@ -1010,13 +1098,14 @@ def store_prediction(cursor, market, ticker, company_name, days_ahead, model_nam
     query = """
     INSERT INTO ai_prediction_history 
     (market, ticker, company_name, prediction_date, target_date, days_ahead, model_name,
-     current_price, predicted_price, predicted_change_pct, model_confidence)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     current_price, predicted_price, predicted_change_pct, model_confidence, predicted_direction)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     
     cursor.execute(query, (
         market, ticker, company_name, str(prediction_date), str(target_date), days_ahead, model_name,
-        float(current_price), float(predicted_price), float(predicted_change * 100), float(confidence)
+        float(current_price), float(predicted_price), float(predicted_change * 100), float(confidence),
+        predicted_direction   # None / 'UP' / 'FLAT' / 'DOWN'
     ))
     
     return True  # Inserted
@@ -1067,9 +1156,16 @@ def update_actual_prices(conn):
             p.percentage_error = CASE WHEN CAST(h.close_price AS FLOAT) = 0 THEN NULL
                 ELSE ABS(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT)) / CAST(h.close_price AS FLOAT) * 100 END,
             p.direction_correct = CASE 
-                WHEN p.predicted_change_pct > 0.01 AND CAST(h.close_price AS FLOAT) > CAST(p.current_price AS FLOAT) THEN 1
-                WHEN p.predicted_change_pct < -0.01 AND CAST(h.close_price AS FLOAT) < CAST(p.current_price AS FLOAT) THEN 1
-                WHEN ABS(p.predicted_change_pct) <= 0.01 AND CAST(p.current_price AS FLOAT) != 0 AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT) < 0.005 THEN 1
+                -- 3-class rows: match UP/FLAT/DOWN label against actual price move (Phase 4C)
+                WHEN p.predicted_direction = 'UP'   AND CAST(h.close_price AS FLOAT) > CAST(p.current_price AS FLOAT) THEN 1
+                WHEN p.predicted_direction = 'DOWN' AND CAST(h.close_price AS FLOAT) < CAST(p.current_price AS FLOAT) THEN 1
+                WHEN p.predicted_direction = 'FLAT'
+                  AND CAST(p.current_price AS FLOAT) != 0
+                  AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT) < 0.015 THEN 1
+                -- Legacy binary rows (predicted_direction IS NULL)
+                WHEN p.predicted_direction IS NULL AND p.predicted_change_pct > 0.01 AND CAST(h.close_price AS FLOAT) > CAST(p.current_price AS FLOAT) THEN 1
+                WHEN p.predicted_direction IS NULL AND p.predicted_change_pct < -0.01 AND CAST(h.close_price AS FLOAT) < CAST(p.current_price AS FLOAT) THEN 1
+                WHEN p.predicted_direction IS NULL AND ABS(p.predicted_change_pct) <= 0.01 AND CAST(p.current_price AS FLOAT) != 0 AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT) < 0.005 THEN 1
                 ELSE 0
             END,
             p.updated_at = GETDATE()
@@ -1224,15 +1320,16 @@ def run_daily_predictions(markets_filter=None):
                 log_message(f"    Training {days_ahead}-day model for {sector_name}...")
                 train_start = datetime.now()
 
-                # FIX 2+5: Use train_sector_model
-                lgb_model, lr_model, scaler, wf_accuracy = train_sector_model(sector_df, days_ahead)
+                # FIX 2+5: Use train_sector_model — now returns 6 values (Phase 3 dynamic weights)
+                lgb_model, lr_model, scaler, wf_accuracy, lgb_weight, lr_weight = train_sector_model(sector_df, days_ahead)
                 train_elapsed = (datetime.now() - train_start).total_seconds()
 
                 if lgb_model is None:
                     log_message(f"    {days_ahead}-day model training failed, skipping", "WARNING")
                     continue
 
-                log_message(f"    Model trained in {train_elapsed:.1f}s, predicting for {len(ticker_latest)} tickers...")
+                log_message(f"    [{days_ahead}d] Weights: LGB={lgb_weight:.2f}, LR={lr_weight:.2f} | "
+                            f"Predicting for {len(ticker_latest)} tickers...")
 
                 for ticker, ticker_df in ticker_latest.items():
                     # FIX 3: Skip SIDEWAYS / INSUFFICIENT regime tickers
@@ -1241,9 +1338,10 @@ def run_daily_predictions(markets_filter=None):
                         continue
 
                     try:
-                        # FIX 6+7: Use predict_for_ticker_v4
-                        direction, predicted_change_pct, confidence = predict_for_ticker_v4(
-                            ticker_df, lgb_model, lr_model, scaler, wf_accuracy, days_ahead
+                        # Phase 3+4C: unpack 4 values; pass dynamic weights
+                        direction, predicted_change_pct, confidence, predicted_direction = predict_for_ticker_v4(
+                            ticker_df, lgb_model, lr_model, scaler, wf_accuracy, days_ahead,
+                            lgb_weight=lgb_weight, lr_weight=lr_weight
                         )
 
                         if direction is None:
@@ -1263,7 +1361,8 @@ def run_daily_predictions(markets_filter=None):
                         inserted = store_prediction(
                             cursor, market, ticker, company_name, days_ahead, 'Ensemble',
                             current_price, predicted_change_pct / 100.0, confidence,
-                            existing_predictions=existing_predictions
+                            existing_predictions=existing_predictions,
+                            predicted_direction=predicted_direction   # Phase 4C
                         )
                         if inserted:
                             total_predictions += 1
