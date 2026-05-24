@@ -67,7 +67,9 @@ MARKETS = {
 
 # S2-1: Dropped 1-day predictions (37% accuracy = worse than coin flip)
 # S2-6: 7-day is primary horizon (only one historically above 50%)
-PREDICTION_DAYS = [3, 7]  # Both horizons: 3-day and 7-day
+# S2-7: Dropped 3-day predictions (42.1% accuracy, systematic DOWN bias —
+#        when predicting DOWN, actual market goes UP +0.15% on average)
+PREDICTION_DAYS = [7]  # 7-day only; 3-day disabled (see S2-7)
 MAX_STOCKS_PER_MARKET = None  # Set to None to process all tickers
 MIN_DATA_POINTS = 200  # Minimum historical data per ticker
 MIN_MARKET_SAMPLES = 5000  # Minimum pooled samples for per-market training
@@ -754,11 +756,13 @@ def predict_for_ticker_v4(ticker_df, lgb_model, lr_model, scaler, wf_accuracy, d
     lr_class  = int(np.argmax(lr_proba))
     agree_bonus = 5.0 if lgb_class == lr_class else -5.0
 
-    # Magnitude estimate from recent median absolute returns
+    # Magnitude: use std of recent n-day returns (corrects 9x variance compression
+    # caused by median-of-abs which regresses every stock toward the mean).
+    # std of signed returns == realistic per-stock volatility estimate.
     recent_returns = ticker_df['close_price'].pct_change(days_ahead).dropna().tail(60)
-    median_abs = recent_returns.abs().median() if len(recent_returns) > 10 else 0.02
+    vol_estimate = recent_returns.std() if len(recent_returns) > 10 else 0.03
     sign = 1.0 if predicted_class == 2 else (-1.0 if predicted_class == 0 else 0.0)
-    predicted_change_pct = sign * median_abs * 100
+    predicted_change_pct = sign * vol_estimate * 100
 
     # FIX 7: Recalibrated confidence anchored to walk-forward accuracy
     #   WF=45% → base=30 (worse than random)

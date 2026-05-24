@@ -268,6 +268,44 @@ def print_accuracy_summary(cursor, markets):
     except Exception:
         pass  # predicted_direction column doesn't exist yet — schema migration not run
 
+    # DOWN prediction accuracy check — bias and sub-random detection
+    try:
+        cursor.execute("""
+            SELECT
+                days_ahead,
+                predicted_direction,
+                COUNT(*)                                                      AS total,
+                SUM(CASE WHEN direction_correct = 1 THEN 1 ELSE 0 END)       AS correct,
+                AVG(CAST(actual_change_pct AS FLOAT))                         AS avg_actual
+            FROM ai_prediction_history
+            WHERE direction_correct IS NOT NULL
+              AND predicted_direction IS NOT NULL
+            GROUP BY days_ahead, predicted_direction
+            ORDER BY days_ahead, predicted_direction
+        """)
+        rows = cursor.fetchall()
+        if rows:
+            log("")
+            log("  Accuracy by Horizon x Direction:")
+            for days_ahead, direction, total, correct, avg_actual in rows:
+                if total and total > 0:
+                    acc = correct / total * 100
+                    avg_str = f"{avg_actual:+.2f}%" if avg_actual is not None else "n/a"
+                    line = f"    {days_ahead}d {direction:<5}: {correct:,}/{total:,} ({acc:.1f}%)  avg actual: {avg_str}"
+                    alerts = []
+                    if direction == 'DOWN' and avg_actual is not None and avg_actual > 0:
+                        alerts.append("BIAS ALERT: DOWN predicted but market goes UP on avg")
+                    if direction == 'DOWN' and acc < 45.0:
+                        alerts.append("SUB-RANDOM: DOWN accuracy < 45%")
+                    if alerts:
+                        log(line, "WARNING")
+                        for alert in alerts:
+                            log(f"      *** {alert} ***", "WARNING")
+                    else:
+                        log(line)
+    except Exception:
+        pass  # predicted_direction or days_ahead column not available
+
 
 # =====================================================
 # MAIN
