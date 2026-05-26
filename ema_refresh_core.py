@@ -59,8 +59,10 @@ def get_logger(market_name):
     ch = logging.StreamHandler()
     ch.setFormatter(fmt)
     log.addHandler(ch)
+    _logs_dir = os.path.join(_SCRIPT_DIR, 'logs')
+    os.makedirs(_logs_dir, exist_ok=True)
     fh = logging.FileHandler(
-        os.path.join(_SCRIPT_DIR, f'ema_refresh_{market_name}_{datetime.now().strftime("%Y%m%d")}.log')
+        os.path.join(_logs_dir, f'ema_refresh_{market_name}_latest.log'), mode='w'
     )
     fh.setFormatter(fmt)
     log.addHandler(fh)

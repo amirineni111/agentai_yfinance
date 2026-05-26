@@ -19,9 +19,8 @@ cd /d "%~dp0"
 REM Create logs directory if it doesn't exist
 if not exist "logs" mkdir logs
 
-REM Set log file with timestamp
-set LOGFILE=logs\signal_tracking_%date:~-4,4%%date:~-10,2%%date:~-7,2%_%time:~0,2%%time:~3,2%%time:~6,2%.log
-set LOGFILE=%LOGFILE: =0%
+REM Fixed log file — overwritten on each run
+set LOGFILE=logs\signal_tracking_latest.log
 
 REM Run the signal tracking job with output to log file
 echo Running signal tracking job...

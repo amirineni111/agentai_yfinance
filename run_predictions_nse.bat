@@ -19,9 +19,8 @@ cd /d "%~dp0"
 REM Create logs directory if it doesn't exist
 if not exist "logs" mkdir logs
 
-REM Set log file with timestamp
-set LOGFILE=logs\prediction_NSE_%date:~-4,4%%date:~-10,2%%date:~-7,2%_%time:~0,2%%time:~3,2%%time:~6,2%.log
-set LOGFILE=%LOGFILE: =0%
+REM Fixed log file — overwritten on each run
+set LOGFILE=logs\prediction_NSE_latest.log
 
 REM Run the prediction job for NSE 500 only
 echo Running NSE 500 prediction job...

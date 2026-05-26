@@ -682,7 +682,8 @@ def load_recommendations() -> pd.DataFrame:
     # Load NSE recommendations
     nse_query = """
         SELECT ticker, company_name, monitor_startdate, monitor_enddate, 
-               comments, process_flag, 'NSE 500' as market
+               comments, process_flag, upper_threshold, lower_threshold,
+               'NSE 500' as market
         FROM dbo.NSE_500 
         WHERE monitor_startdate IS NOT NULL
     """
@@ -691,7 +692,8 @@ def load_recommendations() -> pd.DataFrame:
     # Load NASDAQ recommendations
     nasdaq_query = """
         SELECT ticker, company_name, monitor_startdate, monitor_enddate, 
-               comments, process_flag, 'NASDAQ 100' as market
+               comments, process_flag, upper_threshold, lower_threshold,
+               'NASDAQ 100' as market
         FROM dbo.NASDAQ_top100 
         WHERE monitor_startdate IS NOT NULL
     """
@@ -7694,6 +7696,8 @@ def show_reco_tracking_page():
             'Current Price': f"${current_price:.2f}" if current_price else 'N/A',
             'Performance (%)': f"{performance_pct:.2f}%" if performance_pct is not None else 'N/A',
             'Performance ($)': f"${performance_abs:.2f}" if performance_abs is not None else 'N/A',
+            'Upper Threshold': row['upper_threshold'] if pd.notna(row['upper_threshold']) else None,
+            'Lower Threshold': row['lower_threshold'] if pd.notna(row['lower_threshold']) else None,
             'Comments': row['comments'] or 'None',
             '_performance_num': performance_pct  # For sorting
         })
@@ -7744,7 +7748,64 @@ def show_reco_tracking_page():
         use_container_width=True,
         height=600
     )
-    
+
+    # ── Inline Threshold Editor ──────────────────────────────────────────────
+    with st.expander("🎯 Edit Price Thresholds", expanded=False):
+        st.info("Set or update the upper and lower price targets for each monitored stock. Click **Save Thresholds** to persist the values.")
+
+        # Build editable dataframe from current filtered set
+        threshold_edit_df = filtered_df[['ticker', 'company_name', 'market', 'upper_threshold', 'lower_threshold']].copy()
+        threshold_edit_df = threshold_edit_df.rename(columns={
+            'ticker': 'Ticker',
+            'company_name': 'Company',
+            'market': 'Market',
+            'upper_threshold': 'Upper Threshold',
+            'lower_threshold': 'Lower Threshold'
+        }).reset_index(drop=True)
+
+        edited_thresholds = st.data_editor(
+            threshold_edit_df,
+            use_container_width=True,
+            column_config={
+                'Ticker':          st.column_config.TextColumn('Ticker',          disabled=True),
+                'Company':         st.column_config.TextColumn('Company',         disabled=True),
+                'Market':          st.column_config.TextColumn('Market',          disabled=True),
+                'Upper Threshold': st.column_config.NumberColumn('Upper Threshold', help='Absolute price target (take-profit)', format='%.2f'),
+                'Lower Threshold': st.column_config.NumberColumn('Lower Threshold', help='Absolute price target (stop-loss)',   format='%.2f'),
+            },
+            num_rows='fixed',
+            key='threshold_editor'
+        )
+
+        if st.button("💾 Save Thresholds", type='primary', key='save_thresholds_btn'):
+            _conn = None
+            try:
+                _conn = pyodbc.connect(get_connection_pool())
+                _conn.autocommit = False
+                _cursor = _conn.cursor()
+                for _, _row in edited_thresholds.iterrows():
+                    _table = 'dbo.NSE_500' if _row['Market'] == 'NSE 500' else 'dbo.NASDAQ_top100'
+                    _upper = None if pd.isna(_row['Upper Threshold']) else float(_row['Upper Threshold'])
+                    _lower = None if pd.isna(_row['Lower Threshold']) else float(_row['Lower Threshold'])
+                    _cursor.execute(
+                        f"UPDATE {_table} SET upper_threshold=?, lower_threshold=? WHERE ticker=?",
+                        (_upper, _lower, _row['Ticker'])
+                    )
+                _conn.commit()
+                _conn.close()
+                st.success(f"✅ Thresholds saved for {len(edited_thresholds)} stock(s).")
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as _e:
+                if _conn:
+                    try:
+                        _conn.rollback()
+                        _conn.close()
+                    except Exception:
+                        pass
+                st.error(f"❌ Failed to save thresholds: {_e}")
+    # ── End Threshold Editor ─────────────────────────────────────────────────
+
     # Download button
     csv_data = display_df.to_csv(index=False)
     st.download_button(

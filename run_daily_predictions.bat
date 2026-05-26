@@ -22,9 +22,8 @@ REM call venv\Scripts\activate.bat
 REM Create logs directory if it doesn't exist
 if not exist "logs" mkdir logs
 
-REM Set log file with timestamp
-set LOGFILE=logs\prediction_%date:~-4,4%%date:~-10,2%%date:~-7,2%_%time:~0,2%%time:~3,2%%time:~6,2%.log
-set LOGFILE=%LOGFILE: =0%
+REM Fixed log file — overwritten on each run
+set LOGFILE=logs\prediction_latest.log
 
 REM Run the prediction job with output to log file
 echo Running prediction job...

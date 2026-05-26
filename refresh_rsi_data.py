@@ -14,16 +14,19 @@ Tables updated:
   - nse_500_rsi_data     (from nse_500_hist_data)
   - forex_rsi_data       (from forex_hist_data)
 """
+import os
 import logging
 from datetime import datetime
 from rsi_refresh_core import refresh_market_rsi
 
+_logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(_logs_dir, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(f'rsi_refresh_all_{datetime.now().strftime("%Y%m%d")}.log')
+        logging.FileHandler(os.path.join(_logs_dir, 'rsi_refresh_all_latest.log'), mode='w')
     ]
 )
 log = logging.getLogger(__name__)
