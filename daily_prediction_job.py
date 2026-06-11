@@ -104,8 +104,19 @@ RETIRED_MODELS = {
 # 7-day: 1.5% is roughly 1 ATR for large-caps over a week.
 # 3-day: 0.8% threshold is tighter (less noise in shorter window).
 # =====================================================
-FLAT_THRESHOLD_7D = 0.015   # ±1.5% for 7-day horizon
+FLAT_THRESHOLD_7D = 0.015   # ±1.5% for 7-day horizon (default / NSE-preserving)
 FLAT_THRESHOLD_3D = 0.008   # ±0.8% for 3-day horizon
+
+# Phase 5: Per-market FLAT band. A single global band created a UP/DOWN class
+# skew that made NASDAQ disagree with the sibling ml_trading_predictions model.
+# The band is calibrated per market from the realized 7-day return distribution
+# (see calibrate_flat_threshold). These are the fallbacks used until calibration
+# runs; NSE keeps the historical 1.5% to preserve its already-good behavior.
+FLAT_THRESHOLD_7D_BY_MARKET = {
+    'NSE 500':    0.015,
+    'NASDAQ 100': 0.015,
+    'Forex':      0.010,
+}
 
 # =====================================================
 # WATCHLIST CONFIGURATION
@@ -571,10 +582,14 @@ def calculate_technical_indicators_v4(df, rsi_df=None, market_index_returns=None
 
     return df.dropna()
 
-def train_sector_model(sector_df, days_ahead):
+def train_sector_model(sector_df, days_ahead, market=None):
     """
     FIX 2 + FIX 5: Train a classification model on ONE sector's pooled data.
     Replaces train_market_model().
+
+    Phase 5: `market` selects the per-market FLAT band
+    (FLAT_THRESHOLD_7D_BY_MARKET) so the UP/FLAT/DOWN labels match each market's
+    realized volatility instead of a single global 1.5% band.
 
     Changes vs v3:
       FIX 2: LightGBM is_unbalance=True (handles UP/DOWN class imbalance)
@@ -588,7 +603,11 @@ def train_sector_model(sector_df, days_ahead):
     df = sector_df.copy()
 
     # 3-class classification target: 2=UP, 1=FLAT, 0=DOWN (Phase 4C)
-    flat_threshold = FLAT_THRESHOLD_7D if days_ahead >= 7 else FLAT_THRESHOLD_3D
+    # Phase 5: per-market 7-day band (falls back to global default if unknown market).
+    if days_ahead >= 7:
+        flat_threshold = FLAT_THRESHOLD_7D_BY_MARKET.get(market, FLAT_THRESHOLD_7D)
+    else:
+        flat_threshold = FLAT_THRESHOLD_3D
     future_ret = df['close_price'].shift(-days_ahead) / df['close_price'].replace(0, np.nan) - 1
     df['target'] = np.where(future_ret > flat_threshold, 2,
                    np.where(future_ret < -flat_threshold, 0, 1))
@@ -827,6 +846,86 @@ def build_sector_groups(ticker_list, market):
         log_message(f"    Sector {sector}: {len(tickers)} tickers")
 
     return groups
+
+
+def refresh_sector_map_from_db(conn, market):
+    """
+    Phase 5 (primary NASDAQ fix): replace the hardcoded SECTOR_MAP_NASDAQ with a
+    data-driven ticker -> GICS sector map read from dbo.nasdaq_top100.
+
+    Why: the NASDAQ universe (nasdaq_100_hist_data) is ~2,368 tickers, but the
+    hardcoded map named only ~49 of them, so ~2,300 tickers were dumped into the
+    single OTHER_NASDAQ catch-all and trained as one model across unrelated
+    industries. That noise is why NASDAQ predictions stopped agreeing with the
+    sibling ml_trading_predictions model while NSE (well-sectored) kept agreeing.
+
+    nasdaq_top100.sector uses the SAME 11 GICS names as nasdaq_sector_sentiment,
+    so the sentiment map becomes an identity mapping (no translation table needed).
+
+    Mutates the module globals SECTOR_MAP_NASDAQ and SENTIMENT_SECTOR_MAP['NASDAQ 100'].
+    Only acts for 'NASDAQ 100'; NSE/Forex keep their existing hardcoded maps so their
+    (already-good) behavior and sentiment wiring are untouched.
+    Falls back silently to the hardcoded map on any error.
+    """
+    if market != 'NASDAQ 100':
+        return
+
+    global SECTOR_MAP_NASDAQ
+    try:
+        df = pd.read_sql(
+            "SELECT ticker, sector FROM dbo.nasdaq_top100 WHERE sector IS NOT NULL",
+            conn,
+        )
+        if df.empty:
+            log_message("  Sector map: nasdaq_top100 returned no rows — keeping hardcoded map", "WARNING")
+            return
+
+        new_map = {}
+        for sector, grp in df.groupby('sector'):
+            new_map[sector] = sorted(grp['ticker'].dropna().unique().tolist())
+        new_map['OTHER_NASDAQ'] = []   # catch-all for NULL-sector / unlisted tickers
+
+        SECTOR_MAP_NASDAQ.clear()
+        SECTOR_MAP_NASDAQ.update(new_map)
+
+        # GICS sector names match the sentiment table names exactly -> identity map.
+        SENTIMENT_SECTOR_MAP['NASDAQ 100'] = {s: (None if s == 'OTHER_NASDAQ' else s)
+                                              for s in new_map.keys()}
+
+        named = sum(len(v) for k, v in new_map.items() if k != 'OTHER_NASDAQ')
+        log_message(f"  Sector map (DB): {len(new_map)-1} GICS sectors covering {named} NASDAQ tickers "
+                    f"(was ~49 hardcoded; catch-all now only NULL-sector names)")
+    except Exception as e:
+        log_message(f"  Sector map: DB load failed ({e}) — keeping hardcoded map", "WARNING")
+
+
+def calibrate_flat_threshold(market, all_stock_data, days_ahead=7):
+    """
+    Phase 5: derive the 7-day FLAT band for a market from its realized return
+    distribution (~0.5x the median absolute n-day return), so UP/FLAT/DOWN labels
+    are balanced to the market's own volatility instead of a fixed global 1.5%.
+
+    Mutates FLAT_THRESHOLD_7D_BY_MARKET[market]. Clamped to [0.8%, 4%] for safety.
+    No-op for horizons < 7 (3-day is disabled) and on insufficient data.
+    """
+    if days_ahead < 7 or not all_stock_data:
+        return
+    try:
+        abs_rets = []
+        for df in all_stock_data.values():
+            if 'close_price' in df and len(df) > days_ahead + 30:
+                r = df['close_price'].astype(float).pct_change(days_ahead).abs().dropna()
+                if len(r):
+                    abs_rets.append(r.median())
+        if not abs_rets:
+            return
+        band = float(np.median(abs_rets)) * 0.5
+        band = max(0.008, min(0.04, band))
+        prev = FLAT_THRESHOLD_7D_BY_MARKET.get(market)
+        FLAT_THRESHOLD_7D_BY_MARKET[market] = round(band, 4)
+        log_message(f"  FLAT band calibrated for {market}: {band:.4f} (was {prev})")
+    except Exception as e:
+        log_message(f"  FLAT band calibration failed ({market}): {e} — keeping default", "WARNING")
 
 
 def classify_market_regime(df):
@@ -1248,6 +1347,11 @@ def run_daily_predictions(markets_filter=None):
         log_message(f"\nStep 2: Processing {market}...")
         market_start = datetime.now()
 
+        # Phase 5: replace hardcoded NASDAQ sector map with data-driven GICS sectors
+        # from nasdaq_top100 (no-op for NSE/Forex). Must run before build_sector_groups
+        # and load_sentiment_data, which read the (now refreshed) module globals.
+        refresh_sector_map_from_db(conn, market)
+
         # Get stocks
         stocks = get_top_stocks(conn, market, MAX_STOCKS_PER_MARKET)
         log_message(f"  Found {len(stocks)} stocks to analyze")
@@ -1275,6 +1379,10 @@ def run_daily_predictions(markets_filter=None):
         tickers_with_data = len(all_stock_data)
         total_skipped_data += len(ticker_list) - tickers_with_data
         log_message(f"  {tickers_with_data} tickers have sufficient data (>= {MIN_DATA_POINTS} rows)")
+
+        # Phase 5: calibrate the per-market FLAT band from realized 7-day volatility
+        for _days in PREDICTION_DAYS:
+            calibrate_flat_threshold(market, all_stock_data, _days)
 
         # Bulk preload active learning history
         all_performance_history = {}
@@ -1304,29 +1412,17 @@ def run_daily_predictions(markets_filter=None):
 
         market_predictions = 0
 
-        for sector_name, sector_tickers in sector_groups.items():
-            log_message(f"  Sector: {sector_name} ({len(sector_tickers)} tickers)")
-
-            # FIX 1: Pool only sector tickers (with sentiment)
-            pool_start = datetime.now()
-            sector_df, ticker_latest = pool_sector_data(
-                sector_tickers, all_stock_data, rsi_by_ticker, index_returns,
-                sector_sentiment_df=all_sentiment.get(sector_name)
-            )
-            pool_elapsed = (datetime.now() - pool_start).total_seconds()
-            log_message(f"    Pooled {len(sector_df):,} rows from {len(ticker_latest)} tickers in {pool_elapsed:.1f}s")
-
-            if len(sector_df) < MIN_SECTOR_SAMPLES:
-                log_message(f"    Skipping {sector_name}: insufficient data ({len(sector_df)} < {MIN_SECTOR_SAMPLES})")
-                continue
-
+        def train_predict_pool(pool_label, sector_df, ticker_latest):
+            """Train the per-sector ensemble and emit predictions for one pool.
+            Shared by the per-sector loop and the small-sector fallback so both
+            paths stay identical. Returns the number of predictions stored."""
+            nonlocal total_predictions, market_predictions, total_skipped_dup, errors
+            stored = 0
             for days_ahead in PREDICTION_DAYS:
-                log_message(f"    Training {days_ahead}-day model for {sector_name}...")
-                train_start = datetime.now()
+                log_message(f"    Training {days_ahead}-day model for {pool_label}...")
 
-                # FIX 2+5: Use train_sector_model — now returns 6 values (Phase 3 dynamic weights)
-                lgb_model, lr_model, scaler, wf_accuracy, lgb_weight, lr_weight = train_sector_model(sector_df, days_ahead)
-                train_elapsed = (datetime.now() - train_start).total_seconds()
+                # FIX 2+5: train_sector_model returns 6 values (Phase 3 dynamic weights)
+                lgb_model, lr_model, scaler, wf_accuracy, lgb_weight, lr_weight = train_sector_model(sector_df, days_ahead, market)
 
                 if lgb_model is None:
                     log_message(f"    {days_ahead}-day model training failed, skipping", "WARNING")
@@ -1371,12 +1467,53 @@ def run_daily_predictions(markets_filter=None):
                         if inserted:
                             total_predictions += 1
                             market_predictions += 1
+                            stored += 1
                         else:
                             total_skipped_dup += 1
 
                     except Exception as e:
                         errors += 1
                         log_message(f"      Error predicting {ticker}: {str(e)}", "ERROR")
+            return stored
+
+        # Phase 5: tickers from any sector too small to train on their own are
+        # accumulated and trained together as one fallback pool, so no ticker is
+        # silently dropped (replaces the old per-sector `continue` skip).
+        fallback_tickers = []
+
+        for sector_name, sector_tickers in sector_groups.items():
+            log_message(f"  Sector: {sector_name} ({len(sector_tickers)} tickers)")
+
+            # FIX 1: Pool only sector tickers (with sentiment)
+            pool_start = datetime.now()
+            sector_df, ticker_latest = pool_sector_data(
+                sector_tickers, all_stock_data, rsi_by_ticker, index_returns,
+                sector_sentiment_df=all_sentiment.get(sector_name)
+            )
+            pool_elapsed = (datetime.now() - pool_start).total_seconds()
+            log_message(f"    Pooled {len(sector_df):,} rows from {len(ticker_latest)} tickers in {pool_elapsed:.1f}s")
+
+            if len(sector_df) < MIN_SECTOR_SAMPLES:
+                log_message(f"    {sector_name} below {MIN_SECTOR_SAMPLES} samples "
+                            f"({len(sector_df)}) — deferring {len(sector_tickers)} tickers to fallback pool")
+                fallback_tickers.extend(sector_tickers)
+                continue
+
+            train_predict_pool(sector_name, sector_df, ticker_latest)
+
+        # Phase 5: train the combined fallback pool once (mixed sectors, no sector
+        # sentiment). Only runs if at least one sector was too thin to train alone.
+        if fallback_tickers:
+            log_message(f"  Fallback pool: {len(fallback_tickers)} tickers from under-sized sectors")
+            fb_df, fb_latest = pool_sector_data(
+                fallback_tickers, all_stock_data, rsi_by_ticker, index_returns,
+                sector_sentiment_df=None
+            )
+            if len(fb_df) >= MIN_SECTOR_SAMPLES:
+                train_predict_pool('FALLBACK_POOL', fb_df, fb_latest)
+            else:
+                log_message(f"    Fallback pool still below {MIN_SECTOR_SAMPLES} "
+                            f"({len(fb_df)}) — skipping", "WARNING")
 
         # Free memory
         del all_stock_data
@@ -1384,7 +1521,11 @@ def run_daily_predictions(markets_filter=None):
         conn.commit()
         market_elapsed = (datetime.now() - market_start).total_seconds()
         log_message(f"  {market} complete: {market_predictions} predictions in {market_elapsed:.1f}s")
-    
+
+    # Phase 5 diagnostic: report NASDAQ agreement with the sibling ML model
+    if (not markets_to_process) or ('NASDAQ 100' in markets_to_process):
+        report_sibling_agreement(conn)
+
     conn.close()
     
     # Summary
@@ -1481,6 +1622,60 @@ def run_correlation_check(all_stock_data, rsi_by_ticker=None, sample_n=5):
                 found = True
     if not found:
         print("  None found -- features look good.")
+
+
+def report_sibling_agreement(conn):
+    """
+    Phase 5 diagnostic (read-only): measure how often this repo's NASDAQ direction
+    predictions agree with the sibling ml_trading_predictions model on the latest
+    common trading date. This makes the "NASDAQ doesn't tally" symptom measurable
+    and guards against regressions after the sector-map fix.
+
+    Sibling 'predicted_signal' is Buy/Sell-flavored (no FLAT), so only our
+    directional UP/DOWN rows are compared (FLAT/NULL excluded). Logs the agreement
+    rate; never writes anything.
+    """
+    try:
+        query = """
+            WITH ours AS (
+                SELECT ticker, predicted_direction,
+                       ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY prediction_date DESC) rn
+                FROM ai_prediction_history
+                WHERE market = 'NASDAQ 100' AND predicted_direction IN ('UP','DOWN')
+            ),
+            sib AS (
+                SELECT ticker, predicted_signal,
+                       ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY trading_date DESC) rn
+                FROM ml_trading_predictions
+            )
+            SELECT o.predicted_direction, s.predicted_signal
+            FROM ours o JOIN sib s ON o.ticker = s.ticker
+            WHERE o.rn = 1 AND s.rn = 1
+        """
+        df = pd.read_sql(query, conn)
+        if df.empty:
+            log_message("  Sibling agreement: no overlapping NASDAQ tickers to compare")
+            return
+
+        def sib_dir(sig):
+            s = (sig or '').lower()
+            if 'buy' in s:
+                return 'UP'
+            if 'sell' in s:
+                return 'DOWN'
+            return None
+
+        df['sib_dir'] = df['predicted_signal'].map(sib_dir)
+        df = df.dropna(subset=['sib_dir'])
+        if df.empty:
+            log_message("  Sibling agreement: no directional sibling signals to compare")
+            return
+
+        agree = (df['predicted_direction'] == df['sib_dir']).mean() * 100
+        log_message(f"  NASDAQ sibling agreement: {agree:.1f}% over {len(df)} overlapping tickers "
+                    f"(vs ml_trading_predictions)")
+    except Exception as e:
+        log_message(f"  Sibling agreement check failed: {e}", "WARNING")
 
 
 if __name__ == "__main__":
