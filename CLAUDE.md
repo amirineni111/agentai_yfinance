@@ -15,7 +15,7 @@ This is the **visualization and signal tracking** layer — one of **7 interconn
 | Data Ingestion | `stockanalysis` | ETL: yfinance/Alpha Vantage → SQL Server |
 | SQL Infrastructure | `sqlserver_mcp` | .NET 8 MCP Server (Microsoft MssqlMcp) — 7 tools (ListTables, DescribeTable, ReadData, CreateTable, DropTable, InsertData, UpdateData) via stdio transport for AI IDE ↔ SQL Server |
 | **Dashboard** ⭐ | **`streamlit-trading-dashboard`** | **THIS REPO** — 40+ SQL views, signal tracking, AI predictions, 15-page Streamlit UI |
-| ML: NASDAQ | `sqlserver_copilot` | Gradient Boosting → `ml_trading_predictions` |
+| ML: NASDAQ | `sqlserver_copilot` | Gradient Boosting → `ml_trading_predictions` (since June 2026: ALL ~2,300 tickers daily; suppressed rows have `is_actionable=0` / `signal_strength='Suppressed'` — filter `ISNULL(is_actionable,1)=1` for tradeable signals. Views `vw_strategy2_unified_ml_predictions`, `vw_theme_ml_signal_score`, `vw_theme_stock_signals` already apply this; see `sql/2026-06-12_views_is_actionable_filter.sql`) |
 | ML: NSE | `sqlserver_copilot_nse` | 5-model ensemble → `ml_nse_trading_predictions` |
 | ML: Forex | `sqlserver_copilot_forex` | XGBoost/LightGBM → `forex_ml_predictions` |
 | Agentic AI | `stockdata_agenticai` | 7 CrewAI agents, daily briefing email |

@@ -11485,14 +11485,19 @@ def show_operational_process_page():
 
             with s1_col1:
                 try:
+                    # is_actionable filter (June 2026): the table now stores all
+                    # ~2,300 tickers daily; only actionable rows are tradeable
+                    # signals, so accuracy is measured on those (NULL = pre-flag
+                    # rows, which were all actionable).
                     nasdaq_acc = pd.read_sql("""
-                        SELECT 
+                        SELECT
                             COUNT(*) as total,
                             SUM(CASE WHEN direction_correct_1d = 1 THEN 1 ELSE 0 END) as correct_1d,
                             SUM(CASE WHEN direction_correct_1d IS NOT NULL THEN 1 ELSE 0 END) as eval_1d,
                             SUM(CASE WHEN direction_correct_5d = 1 THEN 1 ELSE 0 END) as correct_5d,
                             SUM(CASE WHEN direction_correct_5d IS NOT NULL THEN 1 ELSE 0 END) as eval_5d
                         FROM ml_trading_predictions
+                        WHERE ISNULL(is_actionable, 1) = 1
                     """, conn)
                     if nasdaq_acc['eval_1d'].iloc[0] > 0:
                         acc = nasdaq_acc['correct_1d'].iloc[0] / nasdaq_acc['eval_1d'].iloc[0] * 100

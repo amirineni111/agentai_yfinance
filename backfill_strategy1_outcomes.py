@@ -449,15 +449,18 @@ def print_accuracy_summary(conn):
     
     cursor = conn.cursor()
     
+    # NASDAQ table stores ALL ~2,300 tickers daily since June 2026; only rows
+    # with is_actionable=1 (NULL = pre-flag era) are tradeable signals, so
+    # accuracy is summarized on those. NSE/Forex tables are unaffected.
     tables = [
-        ("NASDAQ 100", "ml_trading_predictions"),
-        ("NSE 500", "ml_nse_trading_predictions"),
-        ("FOREX", "forex_ml_predictions"),
+        ("NASDAQ 100", "ml_trading_predictions", "WHERE ISNULL(is_actionable, 1) = 1"),
+        ("NSE 500", "ml_nse_trading_predictions", ""),
+        ("FOREX", "forex_ml_predictions", ""),
     ]
-    
-    for label, table in tables:
+
+    for label, table, where_clause in tables:
         cursor.execute(f"""
-            SELECT 
+            SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN actual_return_1d IS NOT NULL THEN 1 ELSE 0 END) as has_1d,
                 SUM(CASE WHEN direction_correct_1d = 1 THEN 1 ELSE 0 END) as correct_1d,
@@ -468,6 +471,7 @@ def print_accuracy_summary(conn):
                 AVG(actual_return_1d) as avg_return_1d,
                 AVG(actual_return_5d) as avg_return_5d
             FROM {table}
+            {where_clause}
         """)
         row = cursor.fetchone()
         
