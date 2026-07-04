@@ -282,6 +282,7 @@ def bulk_load_performance_history(conn, market):
           'Linear Regression', 'Gradient Boosting',
           'Random Forest', 'ExtraTreesClassifier'
       )
+      AND ISNULL(is_actionable, 1) = 1
     GROUP BY ticker, days_ahead, model_name
     HAVING COUNT(*) >= ?
     """
@@ -935,10 +936,12 @@ def classify_market_regime(df):
     Returns:
         'BULL_TREND'   — Strong uptrend; momentum strategies work well
         'BEAR_TREND'   — Strong downtrend; momentum strategies work well
-        'SIDEWAYS'     — Choppy/ranging; momentum signals unreliable — SKIP
+        'SIDEWAYS'     — Choppy/ranging; momentum signals unreliable — suppress
         'INSUFFICIENT' — Not enough data
 
-    Used to gate predictions: skip SIDEWAYS and INSUFFICIENT tickers.
+    Used to gate predictions: SIDEWAYS and INSUFFICIENT tickers are still
+    predicted and stored, but flagged is_actionable=0 with this regime as
+    the suppression_reason.
     """
     if len(df) < REGIME_LOOKBACK_DAYS + 50:
         return 'INSUFFICIENT'
@@ -1171,14 +1174,16 @@ def load_existing_predictions(cursor, market):
     return {(row[0], row[1], row[2]) for row in cursor.fetchall()}
 
 
-def store_prediction(cursor, market, ticker, company_name, days_ahead, model_name, 
+def store_prediction(cursor, market, ticker, company_name, days_ahead, model_name,
                     current_price, predicted_change, confidence, existing_predictions=None,
-                    predicted_direction=None):
+                    predicted_direction=None, is_actionable=1, suppression_reason=None):
     """
-    Store prediction in database. 
+    Store prediction in database.
     Skips if a prediction already exists for this market/ticker/date/days_ahead/model.
     Uses pre-loaded existing_predictions set for O(1) duplicate check instead of per-row SQL.
     Phase 4C: Writes predicted_direction (UP/FLAT/DOWN) when provided.
+    Regime-suppressed predictions carry is_actionable=0 and a suppression_reason
+    ('SIDEWAYS'/'INSUFFICIENT'); consumers filter ISNULL(is_actionable,1)=1.
     """
     prediction_date = datetime.now().date()
     target_date = prediction_date + timedelta(days=days_ahead)
@@ -1199,16 +1204,18 @@ def store_prediction(cursor, market, ticker, company_name, days_ahead, model_nam
             return False
     
     query = """
-    INSERT INTO ai_prediction_history 
+    INSERT INTO ai_prediction_history
     (market, ticker, company_name, prediction_date, target_date, days_ahead, model_name,
-     current_price, predicted_price, predicted_change_pct, model_confidence, predicted_direction)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     current_price, predicted_price, predicted_change_pct, model_confidence, predicted_direction,
+     is_actionable, suppression_reason)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
-    
+
     cursor.execute(query, (
         market, ticker, company_name, str(prediction_date), str(target_date), days_ahead, model_name,
         float(current_price), float(predicted_price), float(predicted_change * 100), float(confidence),
-        predicted_direction   # None / 'UP' / 'FLAT' / 'DOWN'
+        predicted_direction,   # None / 'UP' / 'FLAT' / 'DOWN'
+        int(is_actionable), suppression_reason   # 0 + 'SIDEWAYS'/'INSUFFICIENT' when regime-suppressed
     ))
     
     return True  # Inserted
@@ -1337,6 +1344,8 @@ def run_daily_predictions(markets_filter=None):
     update_actual_prices(conn)
     
     total_predictions = 0
+    total_suppressed = 0
+    total_no_direction = 0
     total_skipped_dup = 0
     total_skipped_data = 0
     total_skipped_unchanged = 0
@@ -1411,12 +1420,14 @@ def run_daily_predictions(markets_filter=None):
         log_message(f"  Grouped into {len(sector_groups)} sectors")
 
         market_predictions = 0
+        market_suppressed = 0
 
         def train_predict_pool(pool_label, sector_df, ticker_latest):
             """Train the per-sector ensemble and emit predictions for one pool.
             Shared by the per-sector loop and the small-sector fallback so both
             paths stay identical. Returns the number of predictions stored."""
-            nonlocal total_predictions, market_predictions, total_skipped_dup, errors
+            nonlocal total_predictions, market_predictions, market_suppressed, \
+                total_suppressed, total_no_direction, total_skipped_dup, errors
             stored = 0
             for days_ahead in PREDICTION_DAYS:
                 log_message(f"    Training {days_ahead}-day model for {pool_label}...")
@@ -1432,10 +1443,12 @@ def run_daily_predictions(markets_filter=None):
                             f"Predicting for {len(ticker_latest)} tickers...")
 
                 for ticker, ticker_df in ticker_latest.items():
-                    # FIX 3: Skip SIDEWAYS / INSUFFICIENT regime tickers
+                    # FIX 3 (revised): SIDEWAYS / INSUFFICIENT regime tickers are no
+                    # longer silently skipped — their predictions are stored with
+                    # is_actionable=0 so every ticker gets a daily row (NASDAQ
+                    # sibling pattern; consumers filter ISNULL(is_actionable,1)=1).
                     regime = classify_market_regime(ticker_df)
-                    if regime in ('SIDEWAYS', 'INSUFFICIENT'):
-                        continue
+                    suppressed = regime in ('SIDEWAYS', 'INSUFFICIENT')
 
                     try:
                         # Phase 3+4C: unpack 4 values; pass dynamic weights
@@ -1445,6 +1458,7 @@ def run_daily_predictions(markets_filter=None):
                         )
 
                         if direction is None:
+                            total_no_direction += 1
                             continue
 
                         # Active learning: adjust confidence
@@ -1462,12 +1476,17 @@ def run_daily_predictions(markets_filter=None):
                             cursor, market, ticker, company_name, days_ahead, 'Ensemble',
                             current_price, predicted_change_pct / 100.0, confidence,
                             existing_predictions=existing_predictions,
-                            predicted_direction=predicted_direction   # Phase 4C
+                            predicted_direction=predicted_direction,   # Phase 4C
+                            is_actionable=0 if suppressed else 1,
+                            suppression_reason=regime if suppressed else None
                         )
                         if inserted:
                             total_predictions += 1
                             market_predictions += 1
                             stored += 1
+                            if suppressed:
+                                total_suppressed += 1
+                                market_suppressed += 1
                         else:
                             total_skipped_dup += 1
 
@@ -1520,7 +1539,9 @@ def run_daily_predictions(markets_filter=None):
 
         conn.commit()
         market_elapsed = (datetime.now() - market_start).total_seconds()
-        log_message(f"  {market} complete: {market_predictions} predictions in {market_elapsed:.1f}s")
+        log_message(f"  {market} complete: {market_predictions} predictions "
+                    f"({market_predictions - market_suppressed} actionable + "
+                    f"{market_suppressed} suppressed) in {market_elapsed:.1f}s")
 
     # Phase 5 diagnostic: report NASDAQ agreement with the sibling ML model
     if (not markets_to_process) or ('NASDAQ 100' in markets_to_process):
@@ -1534,6 +1555,9 @@ def run_daily_predictions(markets_filter=None):
     log_message("=" * 80)
     log_message(f"Daily Direction Prediction Job (v4) Completed!")
     log_message(f"  Total Predictions Generated: {total_predictions}")
+    log_message(f"    Actionable:                {total_predictions - total_suppressed}")
+    log_message(f"    Suppressed (regime):       {total_suppressed}")
+    log_message(f"  Skipped (no direction):      {total_no_direction}")
     log_message(f"  Duplicates Skipped:          {total_skipped_dup}")
     log_message(f"  Stocks Skipped (no data):    {total_skipped_data}")
     log_message(f"  Stocks Skipped (unchanged):  {total_skipped_unchanged}")

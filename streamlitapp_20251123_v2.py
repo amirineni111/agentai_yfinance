@@ -4743,10 +4743,14 @@ def show_prediction_backtesting(market, ticker):
                 WHEN direction_correct = 0 THEN '❌ Wrong'
                 ELSE '⏳ Pending'
             END as direction,
-            CASE 
+            CASE
                 WHEN actual_price IS NOT NULL THEN ROUND(percentage_error, 2)
                 ELSE NULL
-            END as error_pct
+            END as error_pct,
+            CASE
+                WHEN ISNULL(is_actionable, 1) = 1 THEN 'Actionable'
+                ELSE 'Suppressed (' + ISNULL(suppression_reason, 'regime') + ')'
+            END as actionable
         FROM ai_prediction_history
         WHERE market = ? AND ticker = ?
         ORDER BY prediction_date DESC, days_ahead
@@ -10499,6 +10503,8 @@ def show_backtesting_analytics_dashboard():
             percentage_error,
             direction_correct,
             model_confidence,
+            is_actionable,
+            suppression_reason,
             created_at
         FROM ai_prediction_history
         ORDER BY prediction_date DESC
@@ -11555,11 +11561,16 @@ def show_operational_process_page():
 
             try:
                 s2_acc = pd.read_sql("""
-                    SELECT 
+                    SELECT
                         market,
-                        COUNT(*) as evaluated,
-                        ROUND(AVG(CAST(direction_correct AS FLOAT)) * 100, 1) as direction_accuracy,
-                        ROUND(AVG(ABS(percentage_error)), 2) as avg_pct_error
+                        SUM(CASE WHEN ISNULL(is_actionable, 1) = 1 THEN 1 ELSE 0 END) as evaluated,
+                        ROUND(AVG(CASE WHEN ISNULL(is_actionable, 1) = 1
+                                       THEN CAST(direction_correct AS FLOAT) END) * 100, 1) as direction_accuracy,
+                        ROUND(AVG(CASE WHEN ISNULL(is_actionable, 1) = 1
+                                       THEN ABS(percentage_error) END), 2) as avg_pct_error,
+                        SUM(CASE WHEN ISNULL(is_actionable, 1) = 0 THEN 1 ELSE 0 END) as suppressed_evaluated,
+                        ROUND(AVG(CASE WHEN ISNULL(is_actionable, 1) = 0
+                                       THEN CAST(direction_correct AS FLOAT) END) * 100, 1) as suppressed_accuracy
                     FROM ai_prediction_history
                     WHERE direction_correct IS NOT NULL
                     GROUP BY market
@@ -11573,6 +11584,10 @@ def show_operational_process_page():
                             st.metric(f"{row['market']} Direction",
                                       f"{row['direction_accuracy']}%",
                                       f"Avg error: {row['avg_pct_error']}%")
+                            if row['suppressed_evaluated'] and row['suppressed_evaluated'] > 0:
+                                st.caption(f"Suppressed (regime-filtered): "
+                                           f"{row['suppressed_accuracy']}% over "
+                                           f"{int(row['suppressed_evaluated']):,} rows")
             except:
                 st.info("Strategy 2 accuracy data not yet available")
 
