@@ -10442,6 +10442,137 @@ def show_fundamental_analysis_page():
         st.code(traceback.format_exc())
 
 
+# =====================================================
+# PREDICTION ACCURACY METRICS
+#
+# The 3-class model (UP/FLAT/DOWN) cannot be summarised by a single raw
+# accuracy number. FLAT is scored correct when the move stays inside a band
+# set to 0.5x the median absolute 7-day return, so by construction it is
+# right only ~30% of the time; UP and DOWN sit near a ~50% base rate.
+# Averaging the three drags the headline toward 49% regardless of how well
+# the directional calls perform, which is exactly how this model was once
+# mistaken for a coin-flip heuristic.
+# =====================================================
+
+def _class_base_rate(reference_df, direction):
+    """
+    How often this class's success condition happens *anyway*, measured over the
+    whole reference sample — NOT over the rows the model chose to label that way.
+
+    That distinction is the entire point. Scoring "of the rows I called UP, how
+    many rose?" against "of the rows I called UP, how many rose?" is a tautology
+    that yields zero lift by construction. The honest comparison is against the
+    unconditional rate across every graded prediction in the same market and
+    window: that is what a no-skill model that always guessed this class would
+    have scored.
+
+      UP / DOWN : share of ALL rows that moved that way
+      FLAT      : share of ALL rows that stayed inside their own FLAT band
+                  (~37% on NASDAQ/NSE — the band is 0.5x the median absolute
+                  move, so FLAT is a minority-probability call by construction)
+    """
+    moves = pd.to_numeric(reference_df['actual_change_pct'], errors='coerce').dropna()
+    if moves.empty:
+        return None
+    if direction == 'UP':
+        return (moves > 0).mean() * 100
+    if direction == 'DOWN':
+        return (moves < 0).mean() * 100
+    if direction == 'FLAT':
+        if 'flat_band_pct' in reference_df.columns:
+            band = (pd.to_numeric(reference_df['flat_band_pct'], errors='coerce')
+                    .reindex(moves.index) * 100).fillna(1.5)
+        else:
+            band = pd.Series(1.5, index=moves.index)
+        return (moves.abs() < band).mean() * 100
+    return None
+
+
+def per_class_accuracy_table(completed_df):
+    """
+    Per-direction accuracy alongside the unconditional base rate for that class,
+    and the lift between them. Lift is the only column that answers "is this
+    tradeable?" — accuracy alone is not comparable across classes.
+    """
+    if 'predicted_direction' not in completed_df.columns:
+        return None
+    df = completed_df[completed_df['predicted_direction'].notna()]
+    if df.empty:
+        return None
+
+    rows = []
+    for market, market_df in df.groupby('market'):
+        # Reference population for base rates: every graded prediction in this
+        # market and window, whatever the model called it.
+        reference = market_df[market_df['direction_correct'].notna()]
+        if reference.empty:
+            continue
+        for direction, sub in market_df.groupby('predicted_direction'):
+            graded = sub[sub['direction_correct'].notna()]
+            if graded.empty:
+                continue
+            acc = graded['direction_correct'].mean() * 100
+            base = _class_base_rate(reference, direction)
+            rows.append({
+                'Market': market,
+                'Direction': direction,
+                'N': len(graded),
+                'Accuracy %': acc,
+                'Base Rate %': base if base is not None else float('nan'),
+                'Lift (pp)': (acc - base) if base is not None else float('nan'),
+                'Avg Confidence': graded['model_confidence'].mean(),
+            })
+
+    if not rows:
+        return None
+    return pd.DataFrame(rows).sort_values(['Market', 'Direction']).reset_index(drop=True)
+
+
+def directional_accuracy(completed_df):
+    """
+    Accuracy over UP and DOWN calls only, which is the headline that matters:
+    those are the rows that become signals, and they are graded against a ~50%
+    base rate, so the number is directly comparable to a coin flip.
+
+    FLAT is deliberately excluded. It is a training label that stops the
+    classifier forcing a direction on noise, and it is scored against a ~37%
+    base rate — folding it into the headline drags any number toward ~49%
+    regardless of how the directional calls actually performed. Since Phase 6
+    FLAT is never actionable, so this matches the live signal feed.
+
+    Returns (accuracy_pct, n) or (None, 0).
+    """
+    if 'predicted_direction' not in completed_df.columns:
+        return None, 0
+    df = completed_df[completed_df['predicted_direction'].isin(['UP', 'DOWN'])
+                      & completed_df['direction_correct'].notna()]
+    if df.empty:
+        return None, 0
+    return float(df['direction_correct'].mean() * 100), len(df)
+
+
+def balanced_accuracy(completed_df):
+    """
+    Mean of per-class accuracy, each predicted direction weighted equally.
+
+    Kept as a secondary diagnostic only — it is NOT a good headline here,
+    because equal-weighting a class capped at ~37% by construction (FLAT)
+    against two classes near 50% produces a number that looks alarming for
+    structural reasons. Use directional_accuracy() for the headline and this
+    to spot a class collapsing.
+    """
+    if 'predicted_direction' not in completed_df.columns:
+        return None
+    df = completed_df[completed_df['predicted_direction'].notna()
+                      & completed_df['direction_correct'].notna()]
+    if df.empty:
+        return None
+    per_class = df.groupby('predicted_direction')['direction_correct'].mean()
+    if per_class.empty:
+        return None
+    return float(per_class.mean() * 100)
+
+
 def show_backtesting_analytics_dashboard():
     """
     Comprehensive Backtesting Analytics Dashboard with Power BI-style filters and visualizations
@@ -10482,9 +10613,70 @@ def show_backtesting_analytics_dashboard():
             st.info("Run the setup script first: `sqlcmd -S localhost\\MSSQLSERVER01 -d stockdata_db -i create_prediction_history_table.sql`")
             return
         
-        # Load all prediction data
-        data_query = """
-        SELECT 
+        # ---------------------------------------------------------------
+        # Scope controls.
+        #
+        # Defaults matter here. Pulling the whole table blends three
+        # incompatible eras: retired LR/GB/RF rows, legacy binary rows
+        # (predicted_direction IS NULL, written under the old
+        # CONFIDENCE_MULTIPLIER=1.3 scaling), and current 3-class rows. On
+        # NASDAQ the legacy rows outnumber the current ones ~174k to ~104k,
+        # so an unscoped average describes mostly a model that no longer
+        # runs. The 3-class era starts 2026-05-25.
+        # ---------------------------------------------------------------
+        THREE_CLASS_ERA_START = '2026-05-25'
+
+        # flat_band_pct arrives with sql/2026-09-03_add_flat_band.sql. Select it
+        # only if present so the page still renders before that migration runs;
+        # _class_base_rate() falls back to a 1.5% band when the column is absent.
+        has_flat_band = pd.read_sql("""
+            SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'ai_prediction_history' AND COLUMN_NAME = 'flat_band_pct'
+        """, conn)['n'].iloc[0] > 0
+        if not has_flat_band:
+            st.warning(
+                "⚠️ `flat_band_pct` column not found — run "
+                "`sql/2026-09-03_add_flat_band.sql`. Until then FLAT predictions are "
+                "graded against a fixed 1.5% band while the model calibrates it per "
+                "market per run (NASDAQ 1.85%), which understates FLAT accuracy by "
+                "~6 percentage points."
+            )
+
+        scope_col1, scope_col2, scope_col3 = st.columns([1, 1, 2])
+        with scope_col1:
+            lookback_days = st.selectbox(
+                "📅 Window", [30, 90, 180, 365, 0],
+                index=1,
+                format_func=lambda d: "All history" if d == 0 else f"Last {d} days",
+                help="Bounds the query. 'All history' pulls the full table."
+            )
+        with scope_col2:
+            era_current_only = st.checkbox(
+                "Current model only", value=True,
+                help=(f"Restrict to the 3-class era (since {THREE_CLASS_ERA_START}). "
+                      "Unchecking blends in retired LR/GB/RF and legacy binary "
+                      "predictions, which do not describe the model running today.")
+            )
+        with scope_col3:
+            actionable_only = st.checkbox(
+                "Actionable only", value=True,
+                help=("Excludes rows the job flagged is_actionable=0 (FLAT calls "
+                      "and predictions below the calibrated-confidence bar). "
+                      "These are stored for analysis, not as signals.")
+            )
+
+        where = []
+        if lookback_days:
+            where.append(f"prediction_date >= DATEADD(day, -{int(lookback_days)}, CAST(GETDATE() AS DATE))")
+        if era_current_only:
+            where.append(f"prediction_date >= '{THREE_CLASS_ERA_START}'")
+            where.append("predicted_direction IS NOT NULL")
+        if actionable_only:
+            where.append("ISNULL(is_actionable, 1) = 1")
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        data_query = f"""
+        SELECT
             prediction_id,
             market,
             ticker,
@@ -10502,14 +10694,17 @@ def show_backtesting_analytics_dashboard():
             squared_error,
             percentage_error,
             direction_correct,
+            predicted_direction,
+            {'flat_band_pct,' if has_flat_band else ''}
             model_confidence,
             is_actionable,
             suppression_reason,
             created_at
         FROM ai_prediction_history
+        {where_sql}
         ORDER BY prediction_date DESC
         """
-        
+
         df = pd.read_sql(data_query, conn)
         
         if df.empty:
@@ -10638,29 +10833,79 @@ def show_backtesting_analytics_dashboard():
             completion_rate = (completed_count / total_predictions * 100) if total_predictions > 0 else 0
             st.metric("Completed", f"{completed_count:,}", f"{completion_rate:.1f}%")
         
+        # NOTE: predicted_price is NOT a price forecast. The model predicts
+        # direction only; magnitude is filled in as
+        #     sign(class) x std(recent n-day returns)
+        # (daily_prediction_job.predict_for_ticker_v4). MAE/RMSE therefore
+        # measure how volatile the stock was, not how good the model is.
+        # Labelled explicitly so these are never read as model error.
+        MAGNITUDE_PROXY_HELP = (
+            "Volatility-scaled magnitude proxy — NOT a price-forecast error. "
+            "The model outputs direction only; predicted_price is derived as "
+            "current_price x (1 + sign x std(recent returns)). This number "
+            "tracks the stock's volatility. Judge the model on Balanced "
+            "Accuracy and per-class Lift instead."
+        )
+
         with metric_col3:
             if len(completed_df) > 0:
                 avg_mae = completed_df['absolute_error'].mean()
-                st.metric("Avg MAE", f"{avg_mae:.4f}")
+                st.metric("Magnitude MAE ⚠️", f"{avg_mae:.4f}", help=MAGNITUDE_PROXY_HELP)
             else:
-                st.metric("Avg MAE", "N/A")
-        
+                st.metric("Magnitude MAE ⚠️", "N/A", help=MAGNITUDE_PROXY_HELP)
+
         with metric_col4:
             if len(completed_df) > 0:
                 avg_rmse = np.sqrt(completed_df['squared_error'].mean())
-                st.metric("Avg RMSE", f"{avg_rmse:.4f}")
+                st.metric("Magnitude RMSE ⚠️", f"{avg_rmse:.4f}", help=MAGNITUDE_PROXY_HELP)
             else:
-                st.metric("Avg RMSE", "N/A")
+                st.metric("Magnitude RMSE ⚠️", "N/A", help=MAGNITUDE_PROXY_HELP)
         
         with metric_col5:
             if len(completed_df) > 0:
-                direction_accuracy = (completed_df['direction_correct'].sum() / len(completed_df) * 100)
-                emoji = "🟢" if direction_accuracy >= 60 else "🟡" if direction_accuracy >= 50 else "🔴"
-                st.metric("Direction Accuracy", f"{emoji} {direction_accuracy:.1f}%")
+                dir_acc, dir_n = directional_accuracy(completed_df)
+                if dir_acc is None:
+                    raw = completed_df['direction_correct'].mean() * 100
+                    emoji = "🟢" if raw >= 60 else "🟡" if raw >= 50 else "🔴"
+                    st.metric("Direction Accuracy", f"{emoji} {raw:.1f}%",
+                              help="Raw accuracy — no 3-class rows in this scope.")
+                else:
+                    emoji = "🟢" if dir_acc >= 55 else "🟡" if dir_acc >= 52 else "🔴"
+                    st.metric("Directional Accuracy", f"{emoji} {dir_acc:.1f}%",
+                              help=(f"UP and DOWN calls only ({dir_n:,} rows) — the rows that "
+                                    "actually become signals, graded against a ~50% base rate, "
+                                    "so this is directly comparable to a coin flip. FLAT is "
+                                    "excluded: its band is 0.5x the median absolute move, so it "
+                                    "is correct only ~37% of the time by construction and folding "
+                                    "it in drags any headline toward ~49%."))
             else:
-                st.metric("Direction Accuracy", "N/A")
-        
+                st.metric("Directional Accuracy", "N/A")
+
         st.markdown("---")
+
+        # =====================
+        # PER-CLASS ACCURACY vs BASE RATE
+        # =====================
+        if len(completed_df) > 0 and 'predicted_direction' in completed_df.columns:
+            per_class = per_class_accuracy_table(completed_df)
+            if per_class is not None and not per_class.empty:
+                st.markdown("### 🎯 Accuracy by Predicted Direction")
+                st.caption(
+                    "A single blended accuracy number is not interpretable here: each class is "
+                    "graded against a different base rate. **Base Rate** is how often that "
+                    "class's success condition happens across *all* predictions in this market "
+                    "— what a no-skill model that always guessed this class would score. "
+                    "**Lift** is accuracy minus that, and is the only column that answers "
+                    "whether a call carries information."
+                )
+                st.dataframe(
+                    per_class.style.format({
+                        'Accuracy %': '{:.1f}', 'Base Rate %': '{:.1f}',
+                        'Lift (pp)': '{:+.1f}', 'Avg Confidence': '{:.1f}'
+                    }).background_gradient(subset=['Lift (pp)'], cmap='RdYlGn', vmin=-8, vmax=8),
+                    use_container_width=True
+                )
+            st.markdown("---")
         
         # =====================
         # VISUALIZATIONS & DATA
@@ -10727,20 +10972,30 @@ def show_backtesting_analytics_dashboard():
                     'prediction_id': 'count'
                 }).reset_index()
                 
-                model_stats.columns = ['Model', 'MAE', 'RMSE', 'Avg Error %', 'Direction Accuracy %', 'Count']
+                # MAE/RMSE/Error% here are the volatility-scaled magnitude proxy,
+                # not price-forecast error — see MAGNITUDE_PROXY_HELP above.
+                model_stats.columns = ['Model', 'Magnitude MAE ⚠️', 'Magnitude RMSE ⚠️',
+                                       'Magnitude Error % ⚠️', 'Direction Accuracy %', 'Count']
+                st.caption(
+                    "⚠️ Magnitude columns measure volatility, not forecast skill — the model "
+                    "predicts direction only. Compare models on Direction Accuracy."
+                )
                 
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    # MAE comparison
+                    # Magnitude proxy comparison — see the caption above; this is
+                    # volatility, not forecast error, so "lower is better" does
+                    # not hold. Kept for continuity with the historical view.
+                    _mae_col = 'Magnitude MAE ⚠️'
                     fig_mae = px.bar(
-                        model_stats.sort_values('MAE'),
+                        model_stats.sort_values(_mae_col),
                         x='Model',
-                        y='MAE',
-                        title='Mean Absolute Error by Model (Lower is Better)',
-                        color='MAE',
-                        color_continuous_scale='RdYlGn_r',
-                        text='MAE'
+                        y=_mae_col,
+                        title='Magnitude Proxy by Model (volatility, not skill)',
+                        color=_mae_col,
+                        color_continuous_scale='Blues',
+                        text=_mae_col
                     )
                     fig_mae.update_traces(texttemplate='%{text:.4f}', textposition='outside')
                     fig_mae.update_layout(height=400)
@@ -10761,14 +11016,17 @@ def show_backtesting_analytics_dashboard():
                     fig_dir.update_layout(height=400, yaxis_range=[0, 100])
                     st.plotly_chart(fig_dir, use_container_width=True)
                 
-                # Model stats table
+                # Model stats table. Only Direction Accuracy gets a red/green
+                # gradient — colouring the magnitude columns by "good/bad" would
+                # imply they measure skill.
                 st.dataframe(
-                    model_stats.style.background_gradient(subset=['MAE', 'RMSE'], cmap='RdYlGn_r')
+                    model_stats.style.background_gradient(
+                                        subset=['Magnitude MAE ⚠️', 'Magnitude RMSE ⚠️'], cmap='Blues')
                                     .background_gradient(subset=['Direction Accuracy %'], cmap='RdYlGn')
                                     .format({
-                                        'MAE': '{:.4f}',
-                                        'RMSE': '{:.4f}',
-                                        'Avg Error %': '{:.2f}%',
+                                        'Magnitude MAE ⚠️': '{:.4f}',
+                                        'Magnitude RMSE ⚠️': '{:.4f}',
+                                        'Magnitude Error % ⚠️': '{:.2f}%',
                                         'Direction Accuracy %': '{:.1f}%',
                                         'Count': '{:,}'
                                     }),
@@ -10825,28 +11083,47 @@ def show_backtesting_analytics_dashboard():
                     )
                     st.plotly_chart(fig_acc_trend, use_container_width=True)
                 
-                # Market comparison
+                # Market comparison.
+                # Was a scatter of MAE vs direction accuracy — i.e. market
+                # volatility vs accuracy, which relates two unconnected things.
+                # Replaced with raw vs balanced accuracy per market, which shows
+                # how much of each market's headline number is the FLAT base-rate
+                # drag rather than directional performance.
                 st.markdown("#### 📊 Performance by Market")
-                market_stats = completed_df.groupby('market').agg({
-                    'absolute_error': 'mean',
-                    'direction_correct': lambda x: (x.sum() / len(x) * 100) if len(x) > 0 else 0,
-                    'prediction_id': 'count'
-                }).reset_index()
-                market_stats.columns = ['Market', 'MAE', 'Direction Accuracy %', 'Count']
-                
-                fig_market = px.scatter(
-                    market_stats,
-                    x='MAE',
-                    y='Direction Accuracy %',
-                    size='Count',
-                    color='Market',
-                    title='Market Performance: MAE vs Direction Accuracy',
-                    text='Market',
-                    size_max=50
-                )
-                fig_market.update_traces(textposition='top center')
-                fig_market.update_layout(height=400)
-                st.plotly_chart(fig_market, use_container_width=True)
+                market_rows = []
+                for market_name, sub in completed_df.groupby('market'):
+                    graded = sub[sub['direction_correct'].notna()]
+                    if graded.empty:
+                        continue
+                    dir_acc, dir_n = directional_accuracy(graded)
+                    market_rows.append({
+                        'Market': market_name,
+                        'Raw Accuracy % (all classes)': graded['direction_correct'].mean() * 100,
+                        'Directional Accuracy % (UP/DOWN)': dir_acc,
+                        'Count': len(graded),
+                        'Directional N': dir_n,
+                    })
+                market_stats = pd.DataFrame(market_rows)
+
+                if not market_stats.empty:
+                    fig_market = px.bar(
+                        market_stats.melt(
+                            id_vars=['Market', 'Count', 'Directional N'],
+                            value_vars=['Raw Accuracy % (all classes)',
+                                        'Directional Accuracy % (UP/DOWN)'],
+                            var_name='Metric', value_name='Accuracy %'
+                        ).dropna(subset=['Accuracy %']),
+                        x='Market', y='Accuracy %', color='Metric', barmode='group',
+                        title='Raw vs Directional Accuracy by Market '
+                              '(the gap is the FLAT base-rate drag)',
+                        text='Accuracy %'
+                    )
+                    fig_market.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                    fig_market.add_hline(y=50, line_dash='dash', line_color='grey',
+                                         annotation_text='coin flip')
+                    fig_market.update_layout(height=420, yaxis_range=[0, 100])
+                    st.plotly_chart(fig_market, use_container_width=True)
+                    st.dataframe(market_stats, use_container_width=True, hide_index=True)
             
             
             with tab4:
@@ -11152,13 +11429,20 @@ def show_architecture_page():
 
     | Attribute | Value |
     |-----------|-------|
-    | Table | `ai_prediction_history` |
-    | Watchlist | `prediction_watchlist` |
-    | Models | Random Forest, Gradient Boosting, Linear Regression (XGBoost if available) |
-    | Prediction Type | Exact price + percentage change for 1, 3, 7 days |
-    | Active Learning | Yes -- skips models < 45% direction accuracy, boosts confident models |
-    | Confidence | Weighted formula: 50% direction + 20% magnitude + 15% R-squared + 15% consistency |
-    | Outcome Tracking | Built-in via `update_actual_prices()` |
+    | Table | `ai_prediction_history` (`model_name = 'Ensemble'`) |
+    | Models | LightGBM + Logistic Regression, blended by walk-forward accuracy share |
+    | Training | Retrained from scratch every run, per sector, per market -- nothing is pickled |
+    | Prediction Type | **Direction only**: UP / FLAT / DOWN over a 7-day horizon |
+    | Magnitude | `sign(class) x std(recent returns)` -- a volatility proxy, **not** a price forecast |
+    | Confidence | Isotonic calibration of class probability into P(correct), fitted on out-of-fold walk-forward predictions |
+    | Actionable | Non-FLAT call with confidence >= `ACTIONABLE_CONFIDENCE_MIN`; filter `ISNULL(is_actionable,1)=1` |
+    | FLAT band | Recalibrated per market every run; stored per row in `flat_band_pct` and used by the grader |
+    | Outcome Tracking | `update_actual_prices()` (Step 1 of every run, all markets) + `backfill_actual_prices.py` |
+
+    **Reading accuracy from this table:** scope to `prediction_date >= '2026-05-25'`
+    and `predicted_direction IS NOT NULL`. Earlier rows are retired LR/GB/RF and
+    legacy binary predictions. Report balanced accuracy and per-class lift --
+    a single blended number is dominated by FLAT's ~30% base rate.
     """)
 
     st.markdown("---")
@@ -11557,39 +11841,68 @@ def show_operational_process_page():
             st.markdown("---")
 
             # Strategy 2 accuracy
-            st.subheader("Strategy 2 -- Price Regression Accuracy")
+            st.subheader("Strategy 2 -- Direction Accuracy (7-day UP/FLAT/DOWN)")
+            st.caption(
+                "Current 3-class model only (since 2026-05-25), actionable rows only. "
+                "**Directional** accuracy covers UP and DOWN calls — the rows that become "
+                "signals — against a ~50% base rate. FLAT is excluded because its band is "
+                "0.5x the median absolute move, making it correct only ~37% of the time by "
+                "construction; including it drags any headline toward ~49%."
+            )
 
             try:
                 s2_acc = pd.read_sql("""
                     SELECT
                         market,
-                        SUM(CASE WHEN ISNULL(is_actionable, 1) = 1 THEN 1 ELSE 0 END) as evaluated,
-                        ROUND(AVG(CASE WHEN ISNULL(is_actionable, 1) = 1
-                                       THEN CAST(direction_correct AS FLOAT) END) * 100, 1) as direction_accuracy,
-                        ROUND(AVG(CASE WHEN ISNULL(is_actionable, 1) = 1
-                                       THEN ABS(percentage_error) END), 2) as avg_pct_error,
-                        SUM(CASE WHEN ISNULL(is_actionable, 1) = 0 THEN 1 ELSE 0 END) as suppressed_evaluated,
-                        ROUND(AVG(CASE WHEN ISNULL(is_actionable, 1) = 0
-                                       THEN CAST(direction_correct AS FLOAT) END) * 100, 1) as suppressed_accuracy
+                        COUNT(*)                                             AS evaluated,
+                        ROUND(AVG(CAST(direction_correct AS FLOAT)) * 100, 1) AS directional_accuracy,
+                        SUM(CASE WHEN predicted_direction = 'UP'   THEN 1 ELSE 0 END) AS n_up,
+                        ROUND(AVG(CASE WHEN predicted_direction = 'UP'
+                                       THEN CAST(direction_correct AS FLOAT) END) * 100, 1) AS up_accuracy,
+                        SUM(CASE WHEN predicted_direction = 'DOWN' THEN 1 ELSE 0 END) AS n_down,
+                        ROUND(AVG(CASE WHEN predicted_direction = 'DOWN'
+                                       THEN CAST(direction_correct AS FLOAT) END) * 100, 1) AS down_accuracy
                     FROM ai_prediction_history
                     WHERE direction_correct IS NOT NULL
+                      AND predicted_direction IN ('UP', 'DOWN')
+                      AND prediction_date >= '2026-05-25'
+                      AND ISNULL(is_actionable, 1) = 1
                     GROUP BY market
                     ORDER BY market
                 """, conn)
+
+                s2_supp = pd.read_sql("""
+                    SELECT market,
+                           COUNT(*)                                  AS suppressed_evaluated,
+                           ROUND(AVG(CAST(direction_correct AS FLOAT)) * 100, 1) AS suppressed_accuracy
+                    FROM ai_prediction_history
+                    WHERE direction_correct IS NOT NULL
+                      AND predicted_direction IS NOT NULL
+                      AND prediction_date >= '2026-05-25'
+                      AND ISNULL(is_actionable, 1) = 0
+                    GROUP BY market
+                """, conn).set_index('market')
+
                 if not s2_acc.empty:
                     s2_col1, s2_col2, s2_col3 = st.columns(3)
                     for idx, row in s2_acc.iterrows():
                         col = [s2_col1, s2_col2, s2_col3][idx % 3]
                         with col:
-                            st.metric(f"{row['market']} Direction",
-                                      f"{row['direction_accuracy']}%",
-                                      f"Avg error: {row['avg_pct_error']}%")
-                            if row['suppressed_evaluated'] and row['suppressed_evaluated'] > 0:
-                                st.caption(f"Suppressed (regime-filtered): "
-                                           f"{row['suppressed_accuracy']}% over "
-                                           f"{int(row['suppressed_evaluated']):,} rows")
-            except:
-                st.info("Strategy 2 accuracy data not yet available")
+                            acc = row['directional_accuracy']
+                            st.metric(f"{row['market']} Directional",
+                                      f"{acc}%",
+                                      f"{acc - 50:+.1f}pp vs coin flip"
+                                      if pd.notna(acc) else "n/a",
+                                      delta_color="normal")
+                            st.caption(f"UP {row['up_accuracy']}% ({int(row['n_up']):,})  ·  "
+                                       f"DOWN {row['down_accuracy']}% ({int(row['n_down']):,})")
+                            if row['market'] in s2_supp.index:
+                                s = s2_supp.loc[row['market']]
+                                st.caption(f"Suppressed (FLAT / low-confidence): "
+                                           f"{s['suppressed_accuracy']}% over "
+                                           f"{int(s['suppressed_evaluated']):,} rows")
+            except Exception as e:
+                st.info(f"Strategy 2 accuracy data not yet available ({e})")
 
             st.markdown("---")
 
@@ -11691,10 +12004,16 @@ def show_operational_process_page():
 
     with st.expander("Strategy 2 confidence scores seem off"):
         st.markdown("""
-        - Check `CONFIDENCE_MULTIPLIER` in `daily_prediction_job.py` (currently 1.3)
-        - Review active learning thresholds: `MIN_DIRECTION_ACCURACY = 0.45`
-        - Check if models are being skipped due to poor performance (see logs)
-        - Review `prediction_watchlist` for the correct stocks
+        - Confidence is the isotonic-calibrated P(correct), not a heuristic score.
+          `CONFIDENCE_MULTIPLIER` no longer exists -- do not reintroduce a scaling factor.
+        - Check the per-run `Reliability (pred->actual, ...)` line in the job log.
+          Predicted confidence should track realized accuracy across the bins.
+          A flat line means the features carry no confidence signal -- rescaling will not fix it.
+        - `CONFIDENCE_MIN`/`CONFIDENCE_MAX` in `daily_prediction_job.py` are a
+          `[5, 95]` sanity guard. If output is bunching at either bound, the
+          calibrator is degenerate, not the bounds.
+        - `USE_ACTIVE_LEARNING` is off: `adjust_confidence_with_history()` applied
+          hardcoded 1.15/1.05/0.80 multipliers that un-calibrate the output.
         """)
 
     with st.expander("Backfill shows 0 updates"):

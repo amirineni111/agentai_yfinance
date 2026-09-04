@@ -11,8 +11,8 @@ This repo does NOT contain CrewAI agents. It is a **Streamlit dashboard** with 1
         ├─ create_views.py → Creates 40+ SQL views
         │   (Technical indicators, signals, strategies, fundamentals)
         │
-        ├─ ai_predictions.py → Daily 6 PM
-        │   (LR/GB/RF price predictions → ai_prediction_history)
+        ├─ daily_prediction_job.py → Daily, one run per market
+        │   (LightGBM+LogReg 'Ensemble', 7-day UP/FLAT/DOWN → ai_prediction_history)
         │
         ├─ signal_tracker.py → Daily 7 PM
         │   (Signal outcome tracking → signal_tracking_history)

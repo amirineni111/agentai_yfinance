@@ -7,9 +7,21 @@ has elapsed but actual_price is still NULL.
 
 Covers all three markets: NSE 500, NASDAQ 100, Forex.
 
-Run once to recover the ~124,115 unvalidated predictions stalled since Feb 27, 2026.
-The daily_prediction_job.py also runs this logic as Step 1 every night — this script
-is a safe, standalone version with verbose reporting and a --dry-run option.
+RESOLVED 2026-09-03: the ~124,115 predictions stalled since Feb 27, 2026 are fully
+backfilled. Root cause was arithmetic overflow 8115 on NUMERIC columns, fixed by
+migrate_widen_error_columns.sql. Verified 0 rows with an elapsed target_date and
+actual_price IS NULL, across all three markets. Do not carry this as an open issue.
+
+Note on "unresolved" counts: ~11k NASDAQ / ~10k NSE rows normally have
+actual_price IS NULL at any time. Those are 7-day predictions whose target_date
+has not arrived yet — roughly 5 trading days x ticker count. Only rows with an
+ELAPSED target_date indicate a problem.
+
+daily_prediction_job.py runs this same logic as Step 1 every night (for all three
+markets regardless of --market) and now exits non-zero if any market's UPDATE
+fails — the silent per-market failure is what let the Feb stall run unnoticed.
+This script remains the standalone recovery version, with verbose reporting and
+a --dry-run option.
 
 Usage:
     python backfill_actual_prices.py               # run for all markets
@@ -57,6 +69,79 @@ MARKETS = {
 
 
 # =====================================================
+# SHARED GRADING SQL
+#
+# daily_prediction_job.py imports these so the nightly Step-1 backfill and
+# this standalone script can never grade the same row differently. Do not
+# inline a copy -- the two drifted apart once already (the FLAT band).
+# =====================================================
+
+# FLAT is scored against the band that was in force when the prediction was
+# made (stored per row by store_prediction). calibrate_flat_threshold()
+# re-derives that band every run from each market's realized return
+# distribution -- NASDAQ 0.0185, NSE 0.015, Forex 0.0080 as of 2026-09-03 --
+# so a hardcoded constant here silently mismatches the training labels.
+# The ISNULL fallback covers pre-migration rows only.
+FLAT_BAND_SQL = """
+                ISNULL(p.flat_band_pct,
+                       CASE WHEN p.days_ahead >= 7 THEN 0.015 ELSE 0.008 END)
+"""
+
+DIRECTION_CORRECT_SQL = f"""
+            CASE
+                -- 3-class evaluation: predicted_direction IS NOT NULL (v4C and later)
+                WHEN p.predicted_direction = 'UP'
+                     AND CAST(h.close_price AS FLOAT) > CAST(p.current_price AS FLOAT) THEN 1
+                WHEN p.predicted_direction = 'DOWN'
+                     AND CAST(h.close_price AS FLOAT) < CAST(p.current_price AS FLOAT) THEN 1
+                WHEN p.predicted_direction = 'FLAT'
+                     AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT))
+                         / NULLIF(CAST(p.current_price AS FLOAT), 0)
+                         < {FLAT_BAND_SQL} THEN 1
+                -- Legacy binary evaluation: predicted_direction IS NULL (pre-2026-05-25)
+                WHEN p.predicted_direction IS NULL
+                     AND p.predicted_change_pct > 0.01
+                     AND CAST(h.close_price AS FLOAT) > CAST(p.current_price AS FLOAT) THEN 1
+                WHEN p.predicted_direction IS NULL
+                     AND p.predicted_change_pct < -0.01
+                     AND CAST(h.close_price AS FLOAT) < CAST(p.current_price AS FLOAT) THEN 1
+                WHEN p.predicted_direction IS NULL
+                     AND ABS(p.predicted_change_pct) <= 0.01
+                     AND CAST(p.current_price AS FLOAT) != 0
+                     AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT))
+                         / CAST(p.current_price AS FLOAT) < 0.005 THEN 1
+                ELSE 0
+            END
+"""
+
+
+def price_lookup_sql(table, symbol_col):
+    """
+    CROSS APPLY that resolves a prediction against the last close on or before
+    its target_date.
+
+    The lower bound (trading_date >= prediction_date) matters: without it a
+    ticker whose data feed stalled -- delisted, halted, renamed -- resolves
+    against whatever its last bar was, potentially one from before the
+    prediction was even made, producing a confidently wrong outcome. With the
+    bound, such a prediction simply stays unresolved, which is the honest
+    answer and is visible in the pending counts.
+    """
+    return f"""
+        CROSS APPLY (
+            SELECT TOP 1 close_price
+            FROM {table}
+            WHERE {symbol_col} = p.ticker
+              AND trading_date <= p.target_date
+              AND trading_date >= p.prediction_date
+              AND close_price IS NOT NULL
+              AND CAST(close_price AS FLOAT) > 0
+            ORDER BY trading_date DESC
+        ) h
+    """
+
+
+# =====================================================
 # LOGGING
 # =====================================================
 
@@ -99,8 +184,11 @@ def backfill_market(cursor, market, config, today_str, dry_run=False):
     """
     Fill actual_price + derived columns for one market using a single batch UPDATE.
 
-    Uses CROSS APPLY TOP 1 to find the most recent trading day price <= target_date.
-    This correctly handles weekends, public holidays, and early market closes.
+    Resolves each prediction against the last close in
+    [prediction_date, target_date] -- see price_lookup_sql(). This correctly
+    handles weekends, public holidays, and early market closes, and leaves
+    predictions on stalled tickers unresolved rather than grading them
+    against a pre-prediction bar.
 
     Returns: number of rows updated (0 for dry-run).
     """
@@ -159,44 +247,13 @@ def backfill_market(cursor, market, config, today_str, dry_run=False):
                 , 4)
             END,
 
-            -- 3-class direction_correct (supports predicted_direction column added in v4C)
-            p.direction_correct = CASE
-                -- 3-class evaluation: predicted_direction IS NOT NULL (new-style predictions)
-                WHEN p.predicted_direction = 'UP'
-                     AND CAST(h.close_price AS FLOAT) > CAST(p.current_price AS FLOAT) THEN 1
-                WHEN p.predicted_direction = 'DOWN'
-                     AND CAST(h.close_price AS FLOAT) < CAST(p.current_price AS FLOAT) THEN 1
-                WHEN p.predicted_direction = 'FLAT'
-                     AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT))
-                         / NULLIF(CAST(p.current_price AS FLOAT), 0)
-                         < (CASE WHEN p.days_ahead >= 7 THEN 0.015 ELSE 0.008 END) THEN 1
-                -- Legacy binary evaluation: predicted_direction IS NULL (old-style predictions)
-                WHEN p.predicted_direction IS NULL
-                     AND p.predicted_change_pct > 0.01
-                     AND CAST(h.close_price AS FLOAT) > CAST(p.current_price AS FLOAT) THEN 1
-                WHEN p.predicted_direction IS NULL
-                     AND p.predicted_change_pct < -0.01
-                     AND CAST(h.close_price AS FLOAT) < CAST(p.current_price AS FLOAT) THEN 1
-                WHEN p.predicted_direction IS NULL
-                     AND ABS(p.predicted_change_pct) <= 0.01
-                     AND CAST(p.current_price AS FLOAT) != 0
-                     AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT))
-                         / CAST(p.current_price AS FLOAT) < 0.005 THEN 1
-                ELSE 0
-            END,
+            -- 3-class direction_correct (shared with daily_prediction_job.py)
+            p.direction_correct = {DIRECTION_CORRECT_SQL},
 
             p.updated_at = GETDATE()
 
         FROM ai_prediction_history p
-        CROSS APPLY (
-            SELECT TOP 1 close_price
-            FROM {table}
-            WHERE {symbol_col} = p.ticker
-              AND trading_date <= p.target_date
-              AND close_price IS NOT NULL
-              AND CAST(close_price AS FLOAT) > 0
-            ORDER BY trading_date DESC
-        ) h
+        {price_lookup_sql(table, symbol_col)}
 
         WHERE p.market = ?
           AND p.target_date <= ?

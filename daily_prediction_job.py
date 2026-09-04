@@ -45,7 +45,12 @@ sys.stdout.reconfigure(line_buffering=True)
 # Import ML libraries
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
+from sklearn.isotonic import IsotonicRegression
 import lightgbm as lgb
+
+# Shared outcome-grading SQL. Single source of truth for both this job's
+# nightly Step 1 and the standalone backfill_actual_prices.py recovery run.
+from backfill_actual_prices import DIRECTION_CORRECT_SQL, price_lookup_sql
 
 # Database connection
 def get_db_connection():
@@ -74,14 +79,68 @@ MAX_STOCKS_PER_MARKET = None  # Set to None to process all tickers
 MIN_DATA_POINTS = 200  # Minimum historical data per ticker
 MIN_MARKET_SAMPLES = 5000  # Minimum pooled samples for per-market training
 
-# Confidence bounds
-CONFIDENCE_MIN = 30
-CONFIDENCE_MAX = 80
+# Confidence bounds.
+# Phase 6: widened from [30,80] to a bare sanity range. Confidence is now the
+# isotonic-calibrated P(correct) (see predict_for_ticker_v4), so the bounds
+# should only catch degenerate fits -- not compress the distribution. The old
+# tight clamp is why every market's confidence looked identical in [30,80] and
+# why a genuinely strong signal could not distinguish itself.
+CONFIDENCE_MIN = 5
+CONFIDENCE_MAX = 95
+
+# Phase 6: actionability threshold on calibrated confidence. A prediction is
+# tradeable when the model's own calibrated hit rate clears this bar.
+#
+# PROVISIONAL. Measured out-of-fold on the NASDAQ Financial Services pool
+# (40,240 rows) after the target fix:
+#
+#   directional (UP+DOWN) accuracy by calibrated-confidence quartile
+#     Q1 conf 34.2% -> 33.8%      Q3 conf 39.9% -> 37.6%
+#     Q2 conf 37.8% -> 36.8%      Q4 conf 49.3% -> 44.1%
+#
+# 45.0 is roughly the top-quartile boundary. Note this is a 3-class problem:
+# a directional call competes against a ~26-37% base rate, not 50%, because
+# FLAT absorbs ~37% of outcomes. Do NOT read these as coin-flip comparisons.
+#
+# Set the real value per market from the realized reliability curve once ~2
+# weeks of calibrated predictions have resolved. Do not tune it by guessing --
+# and re-check the volume it admits: 55.0 would have passed only 4.3% of
+# directional calls.
+ACTIONABLE_CONFIDENCE_MIN = 45.0
+
+# Magnitude sanity bounds.
+#
+# predicted_change_pct is a volatility proxy (sign x robust vol), not a
+# forecast, but it reaches consumers and must not be absurd. A 7-day move
+# beyond +/-50% is not a realistic central estimate for any liquid name; values
+# past this always traced back to corrupt price history rather than genuine
+# volatility.
+MAX_PREDICTED_MOVE_PCT = 50.0
+
+# Any single n-day return above this in the recent window means the price
+# series contains a discontinuity — almost always an unadjusted reverse split
+# (observed: ALIT $0.56 -> $19.62 in 7 bars = +3,404%). 150% is far outside
+# genuine 7-day equity moves but well inside split territory.
+#
+# This corrupts every price-derived feature, not just the magnitude, so such
+# tickers are marked is_actionable=0 with suppression_reason='PRICE_ARTIFACT'.
+SPLIT_ARTIFACT_RETURN = 1.5
+
+# Fraction of tickers allowed to error before a run is treated as failed.
+# One bad ticker should not sink a 2,300-ticker run; half of them erroring
+# means something systemic (schema drift, bad data load) and must not report
+# success to Task Scheduler.
+MAX_ERROR_RATE = 0.25
 
 # =====================================================
 # ACTIVE LEARNING CONFIGURATION
 # =====================================================
-USE_ACTIVE_LEARNING = True  # Learn from past prediction accuracy
+# Phase 6: DISABLED. adjust_confidence_with_history() multiplies the calibrated
+# confidence by hardcoded 1.15/1.05/0.80 factors, which un-calibrates the
+# isotonic output that model_confidence now depends on. Re-enable only with a
+# replacement that preserves calibration (e.g. refit the isotonic map on
+# per-ticker history rather than rescaling its output).
+USE_ACTIVE_LEARNING = False  # Learn from past prediction accuracy
 MIN_PREDICTIONS_FOR_LEARNING = 10  # Minimum predictions needed to assess model performance
 MIN_DIRECTION_ACCURACY = 0.45  # Skip models with < 45% direction accuracy
 HISTORICAL_LOOKBACK_DAYS = 90  # Look back 90 days for performance analysis
@@ -597,10 +656,18 @@ def train_sector_model(sector_df, days_ahead, market=None):
       FIX 5: Walk-forward windows 2 → 5 (better OOS accuracy estimate)
       FIX 6: Uses SELECTED_FEATURES_V4 (11 features, no correlated duplicates)
 
+    Phase 6: the walk-forward pass now scores the BLENDED ensemble rather than
+    averaging the two models' separate accuracies, and fits an isotonic
+    calibrator mapping winning-class probability -> P(correct) on the same
+    out-of-fold predictions. That calibrator is what produces model_confidence,
+    replacing the hand-tuned piecewise formula whose output turned out to carry
+    no information about accuracy (48-50% correct at every confidence level).
+
     Returns:
-        (lgb_model, lr_model, scaler, wf_accuracy)
-        or (None, None, None, None) if insufficient data.
+        (lgb_model, lr_model, scaler, wf_accuracy, lgb_weight, lr_weight, calibrator)
+        or a 7-tuple of None if insufficient data.
     """
+    FAILED = (None,) * 7
     df = sector_df.copy()
 
     # 3-class classification target: 2=UP, 1=FLAT, 0=DOWN (Phase 4C)
@@ -609,21 +676,67 @@ def train_sector_model(sector_df, days_ahead, market=None):
         flat_threshold = FLAT_THRESHOLD_7D_BY_MARKET.get(market, FLAT_THRESHOLD_7D)
     else:
         flat_threshold = FLAT_THRESHOLD_3D
-    future_ret = df['close_price'].shift(-days_ahead) / df['close_price'].replace(0, np.nan) - 1
+
+    # CRITICAL (Phase 6): shift WITHIN each ticker.
+    #
+    # sector_df is pd.concat over every ticker in the sector, then sorted by
+    # trading_date (pool_sector_data), so consecutive rows are DIFFERENT
+    # companies on the same date. A bare .shift(-days_ahead) therefore produced
+    # price(other_company) / price(this_company) - 1, which is not a return at
+    # all. Measured on the NASDAQ Financial Services pool (99,312 rows):
+    #
+    #   - shift(-7) stayed within the same ticker on 1 row out of 99,312
+    #   - median |target| was 84.5% (max 923,634%) vs 2.6% for a real 7-day return
+    #   - FLAT collapsed to 0.9% of labels instead of ~39%
+    #   - labels matched the correct ones only 30.2% of the time
+    #   - label purity within a ticker was 74.6%, i.e. the "target" mostly
+    #     encoded which ticker the row belonged to
+    #
+    # Because ticker identity is inferable from the features, walk-forward
+    # accuracy looked healthy (~58%) while live predictions sat at ~49%. That
+    # gap -- not a stale artifact -- is why this model appeared to be a
+    # coin flip in production across all three markets.
+    #
+    # groupby('ticker') preserves each ticker's date ordering (sector_df is
+    # date-sorted and the sort is stable), so this is the same-ticker
+    # n-trading-days-ahead return.
+    if 'ticker' in df.columns:
+        future_ret = (df.groupby('ticker')['close_price'].shift(-days_ahead)
+                      / df['close_price'].replace(0, np.nan) - 1)
+    else:
+        # Single-ticker frame (no pooling) — a plain shift is already correct.
+        future_ret = df['close_price'].shift(-days_ahead) / df['close_price'].replace(0, np.nan) - 1
+
     df['target'] = np.where(future_ret > flat_threshold, 2,
                    np.where(future_ret < -flat_threshold, 0, 1))
-    df = df.dropna(subset=['target'])
+    # np.where maps NaN to class 1, so an explicit notna filter is required --
+    # otherwise the last `days_ahead` rows of every ticker (the highest
+    # time-weighted ones) become fabricated FLAT labels.
+    df = df[future_ret.notna()]
     df['target'] = df['target'].astype(int)
+
+    # Guard against the target silently becoming a cross-ticker price ratio
+    # again. A real n-day equity return has a median magnitude of a few percent;
+    # the corrupted version measured 84.5%. Cheap to check, and it fails loudly
+    # in the log rather than after months of ~chance live predictions.
+    _mag = future_ret.dropna().abs().median()
+    if _mag is not None and _mag > 0.25:
+        log_message(
+            f"    [{days_ahead}d] TARGET SANITY CHECK FAILED: median |target| = "
+            f"{_mag*100:.1f}% (expected <25% for a {days_ahead}-day return). "
+            f"The target is probably being computed across ticker boundaries — "
+            f"check that the shift is grouped by 'ticker'.", "ERROR"
+        )
 
     if len(df) < MIN_SECTOR_SAMPLES:
         log_message(f"    [{days_ahead}d] Insufficient sector data ({len(df)} < {MIN_SECTOR_SAMPLES}), skipping", "WARNING")
-        return None, None, None, None
+        return FAILED
 
     # FIX 6: Use only the 11 non-correlated features
     feature_cols = [f for f in SELECTED_FEATURES_V4 if f in df.columns]
     if len(feature_cols) < 7:
         log_message(f"    [{days_ahead}d] Only {len(feature_cols)} features available, skipping", "WARNING")
-        return None, None, None, None
+        return FAILED
 
     X_all = df[feature_cols].values
     y_all = df['target'].values
@@ -640,9 +753,16 @@ def train_sector_model(sector_df, days_ahead, market=None):
     min_train = int(n_samples * 0.50)
     window_size = max(80, (n_samples - min_train) // (n_windows + 1))
 
-    wf_direction_scores = []
     lgb_wf_scores = []   # Per-model scores for dynamic weighting (Phase 3)
     lr_wf_scores  = []
+
+    # Phase 6: retain the raw out-of-fold probabilities so the blended ensemble
+    # can be scored and calibrated once the weights are known. Scoring the two
+    # models separately (the old approach) measured neither of the things that
+    # actually ships.
+    oof_lgb_proba = []
+    oof_lr_proba  = []
+    oof_y         = []
 
     for w in range(n_windows):
         train_end = min_train + w * window_size
@@ -672,22 +792,28 @@ def train_sector_model(sector_df, days_ahead, market=None):
                 random_state=42, verbosity=-1, n_jobs=-1
             )
             lgb_wf.fit(wf_X_train_s, wf_y_train, sample_weight=wf_weights)
-            lgb_acc = np.mean(lgb_wf.predict(wf_X_test_s) == wf_y_test)
-            lgb_wf_scores.append(lgb_acc)
-            wf_direction_scores.append(lgb_acc)
+            lgb_p = lgb_wf.predict_proba(wf_X_test_s)
+            lgb_wf_scores.append(np.mean(np.argmax(lgb_p, axis=1) == wf_y_test))
         except Exception as e:
             log_message(f"    LGB WF error: {e}", "WARNING")
+            lgb_p = None
 
         try:
             lr_wf = LogisticRegression(C=0.1, max_iter=500, class_weight='balanced', random_state=42)
             lr_wf.fit(wf_X_train_s, wf_y_train, sample_weight=wf_weights)
-            lr_acc = np.mean(lr_wf.predict(wf_X_test_s) == wf_y_test)
-            lr_wf_scores.append(lr_acc)
-            wf_direction_scores.append(lr_acc)
+            lr_p = lr_wf.predict_proba(wf_X_test_s)
+            lr_wf_scores.append(np.mean(np.argmax(lr_p, axis=1) == wf_y_test))
         except Exception as e:
             log_message(f"    LR WF error: {e}", "WARNING")
+            lr_p = None
 
-    wf_accuracy = np.mean(wf_direction_scores) * 100 if wf_direction_scores else 50.0
+        # Only keep folds where both models produced probabilities — a blended
+        # score built from one model on some folds and two on others is not a
+        # measurement of anything.
+        if lgb_p is not None and lr_p is not None and lgb_p.shape == lr_p.shape:
+            oof_lgb_proba.append(lgb_p)
+            oof_lr_proba.append(lr_p)
+            oof_y.append(wf_y_test)
 
     # Compute dynamic ensemble weights from per-model walk-forward accuracy (Phase 3)
     # Each model's weight = its WF accuracy share, clamped to [0.30, 0.70].
@@ -696,6 +822,32 @@ def train_sector_model(sector_df, days_ahead, market=None):
     _total  = lgb_avg + lr_avg
     lgb_weight = max(0.30, min(0.70, lgb_avg / _total)) if _total > 0 else 0.60
     lr_weight  = 1.0 - lgb_weight
+
+    # Phase 6: score and calibrate the BLEND that actually ships.
+    calibrator = None
+    if oof_y:
+        blend_proba = (lgb_weight * np.vstack(oof_lgb_proba)
+                       + lr_weight * np.vstack(oof_lr_proba))
+        y_oof       = np.concatenate(oof_y)
+        pred_class  = np.argmax(blend_proba, axis=1)
+        win_proba   = blend_proba[np.arange(len(pred_class)), pred_class]
+        was_correct = (pred_class == y_oof).astype(float)
+
+        wf_accuracy = float(was_correct.mean() * 100)
+
+        # Map winning-class probability -> P(correct). Isotonic is the right
+        # choice here: monotone but free-form, so it can express "this model's
+        # 0.45 means 52% correct" without assuming a parametric shape.
+        # Needs both outcomes present, or the fit is a constant.
+        if len(was_correct) >= 50 and 0 < was_correct.sum() < len(was_correct):
+            try:
+                calibrator = IsotonicRegression(
+                    y_min=0.02, y_max=0.98, out_of_bounds='clip'
+                ).fit(win_proba, was_correct)
+            except Exception as e:
+                log_message(f"    Calibrator fit failed: {e} — falling back to WF accuracy", "WARNING")
+    else:
+        wf_accuracy = float(np.mean(lgb_wf_scores + lr_wf_scores) * 100) if (lgb_wf_scores or lr_wf_scores) else 50.0
 
     # Train final models on 80% of data (time-ordered)
     train_end_final = int(n_samples * 0.80)
@@ -726,33 +878,71 @@ def train_sector_model(sector_df, days_ahead, market=None):
     lr_test_acc = np.mean(lr_model.predict(X_test_scaled) == y_test) * 100 if len(y_test) > 0 else 0
 
     log_message(f"    [{days_ahead}d] Trained on {len(X_train):,} samples | "
-                f"WF acc (5-fold): {wf_accuracy:.1f}% | "
+                f"WF acc (blended, 5-fold): {wf_accuracy:.1f}% | "
                 f"Test: LGB={lgb_test_acc:.1f}%, LR={lr_test_acc:.1f}% | "
-                f"Weights: LGB={lgb_weight:.2f}, LR={lr_weight:.2f}")
+                f"Weights: LGB={lgb_weight:.2f}, LR={lr_weight:.2f} | "
+                f"Calibrator: {'fitted' if calibrator is not None else 'NONE (fallback)'}")
 
-    return lgb_model, lr_model, scaler, wf_accuracy, lgb_weight, lr_weight
+    if calibrator is not None:
+        log_reliability(calibrator, win_proba, was_correct, days_ahead)
+
+    return lgb_model, lr_model, scaler, wf_accuracy, lgb_weight, lr_weight, calibrator
+
+
+def log_reliability(calibrator, win_proba, was_correct, days_ahead, n_bins=5):
+    """
+    Log the calibrator's reliability on the out-of-fold data it was fitted to:
+    predicted P(correct) vs realized, in equal-count bins.
+
+    This is the immediate check on Phase 6 -- it does not require waiting for
+    the 7-day horizon to resolve. A well-behaved calibrator shows realized
+    accuracy tracking predicted confidence across bins. A flat line means the
+    features carry no confidence signal and no amount of rescaling will help.
+    """
+    try:
+        conf = calibrator.predict(win_proba)
+        order = np.argsort(conf)
+        parts = np.array_split(order, n_bins)
+        cells = []
+        for part in parts:
+            if len(part) == 0:
+                continue
+            cells.append(f"{conf[part].mean()*100:.0f}%->{was_correct[part].mean()*100:.0f}%")
+        log_message(f"    [{days_ahead}d] Reliability (pred->actual, n={len(win_proba):,}): "
+                    + "  ".join(cells))
+    except Exception as e:
+        log_message(f"    Reliability check failed: {e}", "WARNING")
 
 
 def predict_for_ticker_v4(ticker_df, lgb_model, lr_model, scaler, wf_accuracy, days_ahead,
-                          lgb_weight=0.6, lr_weight=0.4):
+                          lgb_weight=0.6, lr_weight=0.4, calibrator=None):
     """
-    FIX 7: Generate direction prediction for a single ticker (replaces predict_for_ticker).
+    Generate a direction prediction for a single ticker.
 
     Changes vs v3:
-      FIX 7: Confidence anchored to actual walk-forward accuracy.
       FIX 6: Uses SELECTED_FEATURES_V4 (11 + 2 regime features)
       Phase 3: Dynamic ensemble weights (lgb_weight, lr_weight) from WF per-model scoring.
       Phase 4C: 3-class output — 0=DOWN, 1=FLAT, 2=UP. Returns predicted_direction string.
+      Phase 6: confidence is the isotonic-calibrated P(correct) from the
+               walk-forward pass, so it means exactly one thing: the fraction
+               of predictions at this score that come true. Verify it with the
+               confidence-bucket query in docs, or the per-run reliability line.
+
+    The previous formula (base anchored to WF accuracy + probability bonus +
+    agreement bonus, clamped to [30,80]) was measurably uninformative: accuracy
+    was 48-50% in every confidence bucket on both NASDAQ and NSE. Do not
+    reintroduce hand-tuned additive bonuses here -- they destroy calibration.
 
     Regime check is done in the main loop before calling this function.
 
     Returns:
-        (direction, predicted_change_pct, confidence, predicted_direction)
-        or (None, None, None, None) if prediction not possible
+        (direction, predicted_change_pct, confidence, predicted_direction,
+         price_series_suspect)
+        or (None, None, None, None, False) if prediction not possible
     """
     feature_cols = [f for f in SELECTED_FEATURES_V4 if f in ticker_df.columns]
     if len(feature_cols) < 7:
-        return None, None, None, None
+        return None, None, None, None, False
 
     latest = ticker_df[feature_cols].iloc[-1:].values
     latest_scaled = scaler.transform(latest)
@@ -771,45 +961,69 @@ def predict_for_ticker_v4(ticker_df, lgb_model, lr_model, scaler, wf_accuracy, d
     # Binary direction for backward-compat fields (FLAT is treated conservatively as 0/DOWN)
     direction = 1 if predicted_class == 2 else 0
 
-    # Per-model agreement (based on each model's argmax)
-    lgb_class = int(np.argmax(lgb_proba))
-    lr_class  = int(np.argmax(lr_proba))
-    agree_bonus = 5.0 if lgb_class == lr_class else -5.0
-
-    # Magnitude: use std of recent n-day returns (corrects 9x variance compression
-    # caused by median-of-abs which regresses every stock toward the mean).
-    # std of signed returns == realistic per-stock volatility estimate.
+    # Magnitude: robust volatility of recent n-day returns.
+    #
+    # This is a volatility proxy, NOT a price forecast — the model outputs
+    # direction only. But it is stored in predicted_price and surfaces to
+    # consumers, so it has to be sane.
+    #
+    # Plain std() blew up on tickers with an unadjusted reverse split. A single
+    # price discontinuity contaminates exactly `days_ahead` overlapping windows,
+    # e.g. ALIT went $0.56 -> $19.62 in 7 bars (a 3,404% "return"), giving
+    # std = 9.886 and a printed forecast of -988.6%. Observed Sep 2026: AMOD
+    # +801%, ALIT -989%, AIFU +577%, AEHL +423%.
+    #
+    # Winsorizing does not fix this: 7 of 60 windows (11.7%) are contaminated,
+    # so a 5-95pct clip barely moves the estimate (ALIT 988% -> 973%). MAD
+    # tolerates up to 50% contamination and returns a sensible 16.7%.
+    # 1.4826 rescales MAD to be consistent with std under normality.
     recent_returns = ticker_df['close_price'].pct_change(days_ahead).dropna().tail(60)
-    vol_estimate = recent_returns.std() if len(recent_returns) > 10 else 0.03
+    if len(recent_returns) > 10:
+        med = recent_returns.median()
+        vol_estimate = 1.4826 * (recent_returns - med).abs().median()
+        # MAD collapses to 0 for a flat/halted series — fall back rather than
+        # emit a 0% move.
+        if not np.isfinite(vol_estimate) or vol_estimate <= 0:
+            vol_estimate = 0.03
+    else:
+        vol_estimate = 0.03
+
+    # A split artifact means the PRICE SERIES is corrupt, which means the
+    # features derived from it (returns, volatility_20, hl_range,
+    # week52_position) are corrupt too — so the direction call is untrustworthy,
+    # not just the magnitude. Flag it so the caller can suppress actionability.
+    price_series_suspect = bool(
+        len(recent_returns) > 10
+        and (recent_returns.abs() > SPLIT_ARTIFACT_RETURN).any()
+    )
+
     sign = 1.0 if predicted_class == 2 else (-1.0 if predicted_class == 0 else 0.0)
     predicted_change_pct = sign * vol_estimate * 100
 
-    # FIX 7: Recalibrated confidence anchored to walk-forward accuracy
-    #   WF=45% → base=30 (worse than random)
-    #   WF=50% → base=40 (coin flip)
-    #   WF=55% → base=53 (some edge)
-    #   WF=60% → base=66 (meaningful edge)
-    if wf_accuracy < 48.0:
-        base_confidence = 30.0
-    elif wf_accuracy < 52.0:
-        base_confidence = 40.0
+    # Belt and braces: a hard cap so nothing absurd can reach the database even
+    # if a new failure mode defeats the robust estimator.
+    predicted_change_pct = float(np.clip(predicted_change_pct,
+                                         -MAX_PREDICTED_MOVE_PCT,
+                                          MAX_PREDICTED_MOVE_PCT))
+
+    # Phase 6: confidence = calibrated P(this prediction is correct), as a
+    # percentage. The isotonic map was fitted on out-of-fold walk-forward
+    # predictions from this same sector model, so it is specific to this
+    # sector, market, and horizon.
+    if calibrator is not None:
+        confidence = float(calibrator.predict([direction_prob])[0]) * 100.0
     else:
-        base_confidence = 40.0 + (wf_accuracy - 52.0) * (35.0 / 13.0)
+        # No calibrator (too few out-of-fold rows, or the fit failed): fall back
+        # to the sector's blended walk-forward accuracy. Honest and uninformative
+        # rather than confidently wrong.
+        confidence = float(wf_accuracy)
 
-    # Probability bonus: distance of winning class probability from uniform (1/n_classes)
-    n_classes  = len(avg_proba)
-    uniform    = 1.0 / n_classes
-    prob_bonus = (direction_prob - uniform) * 20   # max ~+14 for 3-class
-
-    confidence = base_confidence + prob_bonus + agree_bonus
-
-    # FLAT predictions get a confidence cap — harder to call than directional moves
-    if predicted_direction == 'FLAT':
-        confidence = min(confidence, 50.0)
-
+    # Wide sanity bound only. The old [30,80] clamp was tight enough to be the
+    # dominant effect on the output distribution and made every market's
+    # confidence range look identical.
     confidence = max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, confidence))
 
-    return direction, predicted_change_pct, confidence, predicted_direction
+    return direction, predicted_change_pct, confidence, predicted_direction, price_series_suspect
 
 
 def get_sector_for_ticker(ticker, market):
@@ -1176,14 +1390,20 @@ def load_existing_predictions(cursor, market):
 
 def store_prediction(cursor, market, ticker, company_name, days_ahead, model_name,
                     current_price, predicted_change, confidence, existing_predictions=None,
-                    predicted_direction=None, is_actionable=1, suppression_reason=None):
+                    predicted_direction=None, is_actionable=1, suppression_reason=None,
+                    flat_band_pct=None):
     """
     Store prediction in database.
     Skips if a prediction already exists for this market/ticker/date/days_ahead/model.
     Uses pre-loaded existing_predictions set for O(1) duplicate check instead of per-row SQL.
     Phase 4C: Writes predicted_direction (UP/FLAT/DOWN) when provided.
-    Regime-suppressed predictions carry is_actionable=0 and a suppression_reason
-    ('SIDEWAYS'/'INSUFFICIENT'); consumers filter ISNULL(is_actionable,1)=1.
+    Suppressed predictions carry is_actionable=0 and a suppression_reason;
+    consumers filter ISNULL(is_actionable,1)=1.
+
+    flat_band_pct records the UP/FLAT/DOWN label band this prediction was made
+    under. calibrate_flat_threshold() re-derives that band every run, so the
+    grader must read it off the row rather than assume a constant -- otherwise
+    a FLAT call trained at 1.85% gets graded at 1.5%.
     """
     prediction_date = datetime.now().date()
     target_date = prediction_date + timedelta(days=days_ahead)
@@ -1207,15 +1427,16 @@ def store_prediction(cursor, market, ticker, company_name, days_ahead, model_nam
     INSERT INTO ai_prediction_history
     (market, ticker, company_name, prediction_date, target_date, days_ahead, model_name,
      current_price, predicted_price, predicted_change_pct, model_confidence, predicted_direction,
-     is_actionable, suppression_reason)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     is_actionable, suppression_reason, flat_band_pct)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
 
     cursor.execute(query, (
         market, ticker, company_name, str(prediction_date), str(target_date), days_ahead, model_name,
         float(current_price), float(predicted_price), float(predicted_change * 100), float(confidence),
         predicted_direction,   # None / 'UP' / 'FLAT' / 'DOWN'
-        int(is_actionable), suppression_reason   # 0 + 'SIDEWAYS'/'INSUFFICIENT' when regime-suppressed
+        int(is_actionable), suppression_reason,  # 0 + 'FLAT'/'LOW_CONFIDENCE'/regime when suppressed
+        float(flat_band_pct) if flat_band_pct is not None else None
     ))
     
     return True  # Inserted
@@ -1224,23 +1445,32 @@ def update_actual_prices(conn):
     """
     Update actual prices for past predictions where target_date has arrived.
     Uses batch SQL for performance instead of row-by-row.
+
+    Grading SQL is imported from backfill_actual_prices so the nightly pass
+    and the standalone recovery script can never disagree about whether a
+    prediction was right.
+
+    Returns True if every market's UPDATE succeeded, False otherwise. A
+    per-market failure used to be swallowed by a bare log line, which is how
+    the Feb 2026 overflow stall ran unnoticed for months.
     """
     today = datetime.now().date()
     cursor = conn.cursor()
-    
+
     # Count pending first
     cursor.execute("""
-        SELECT COUNT(*) FROM ai_prediction_history 
+        SELECT COUNT(*) FROM ai_prediction_history
         WHERE target_date <= ? AND actual_price IS NULL
     """, (str(today),))
     pending_count = cursor.fetchone()[0]
     log_message(f"Found {pending_count} predictions to update with actual prices")
-    
+
     if pending_count == 0:
-        return
-    
+        return True
+
     total_updated = 0
-    
+    failed_markets = []
+
     # Include Forex for updating historical predictions (even though we no longer generate new ones)
     all_markets_for_update = dict(MARKETS)
     all_markets_for_update['Forex'] = {'table': 'forex_hist_data', 'symbol_col': 'symbol', 'company_col': 'symbol'}
@@ -1250,49 +1480,31 @@ def update_actual_prices(conn):
         table = config['table']
         symbol_col = config['symbol_col']
         
-        # Update actual prices using batch SQL with JOIN
-        # Uses trading_date <= target_date to find the closest available price
+        # Update actual prices using batch SQL with JOIN.
+        # Grading CASE and price lookup are imported from backfill_actual_prices
+        # so both graders stay identical (they drifted apart once on the FLAT band).
         # Guards: NULLIF prevents division by zero; capped squared_error avoids numeric overflow
         update_sql = f"""
         UPDATE p
-        SET 
+        SET
             p.actual_price = CAST(h.close_price AS FLOAT),
             p.actual_change_pct = CASE WHEN CAST(p.current_price AS FLOAT) = 0 THEN NULL
                 ELSE ((CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT)) * 100 END,
             p.absolute_error = ABS(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT)),
-            p.squared_error = CASE 
+            p.squared_error = CASE
                 WHEN ABS(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT)) > 1000000 THEN 999999999999
                 ELSE POWER(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT), 2) END,
             p.percentage_error = CASE WHEN CAST(h.close_price AS FLOAT) = 0 THEN NULL
                 ELSE ABS(CAST(p.predicted_price AS FLOAT) - CAST(h.close_price AS FLOAT)) / CAST(h.close_price AS FLOAT) * 100 END,
-            p.direction_correct = CASE 
-                -- 3-class rows: match UP/FLAT/DOWN label against actual price move (Phase 4C)
-                WHEN p.predicted_direction = 'UP'   AND CAST(h.close_price AS FLOAT) > CAST(p.current_price AS FLOAT) THEN 1
-                WHEN p.predicted_direction = 'DOWN' AND CAST(h.close_price AS FLOAT) < CAST(p.current_price AS FLOAT) THEN 1
-                WHEN p.predicted_direction = 'FLAT'
-                  AND CAST(p.current_price AS FLOAT) != 0
-                  AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT) < 0.015 THEN 1
-                -- Legacy binary rows (predicted_direction IS NULL)
-                WHEN p.predicted_direction IS NULL AND p.predicted_change_pct > 0.01 AND CAST(h.close_price AS FLOAT) > CAST(p.current_price AS FLOAT) THEN 1
-                WHEN p.predicted_direction IS NULL AND p.predicted_change_pct < -0.01 AND CAST(h.close_price AS FLOAT) < CAST(p.current_price AS FLOAT) THEN 1
-                WHEN p.predicted_direction IS NULL AND ABS(p.predicted_change_pct) <= 0.01 AND CAST(p.current_price AS FLOAT) != 0 AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.current_price AS FLOAT)) / CAST(p.current_price AS FLOAT) < 0.005 THEN 1
-                ELSE 0
-            END,
+            p.direction_correct = {DIRECTION_CORRECT_SQL},
             p.updated_at = GETDATE()
         FROM ai_prediction_history p
-        CROSS APPLY (
-            SELECT TOP 1 close_price
-            FROM {table}
-            WHERE {symbol_col} = p.ticker 
-              AND trading_date <= p.target_date
-              AND close_price IS NOT NULL AND CAST(close_price AS FLOAT) > 0
-            ORDER BY trading_date DESC
-        ) h
+        {price_lookup_sql(table, symbol_col)}
         WHERE p.market = ?
           AND p.target_date <= ?
           AND p.actual_price IS NULL
         """
-        
+
         try:
             cursor.execute(update_sql, (market, str(today)))
             updated = cursor.rowcount
@@ -1300,10 +1512,29 @@ def update_actual_prices(conn):
             if updated > 0:
                 log_message(f"  {market}: Updated {updated} predictions with actual prices")
         except Exception as e:
+            failed_markets.append(market)
             log_message(f"  {market}: Error updating actual prices: {str(e)}", "ERROR")
-    
+
     conn.commit()
     log_message(f"Total updated: {total_updated} predictions with actual prices")
+
+    # Anything still pending with an elapsed target_date is a real problem:
+    # either a market's UPDATE failed, or the price history has a hole.
+    cursor.execute("""
+        SELECT market, COUNT(*) FROM ai_prediction_history
+        WHERE target_date <= ? AND actual_price IS NULL
+        GROUP BY market
+    """, (str(today),))
+    still_pending = {row[0]: row[1] for row in cursor.fetchall()}
+    if still_pending:
+        for mkt, cnt in sorted(still_pending.items()):
+            log_message(f"  {mkt}: {cnt} predictions STILL unresolved past target_date", "WARNING")
+
+    if failed_markets:
+        log_message(f"BACKFILL FAILED for: {', '.join(failed_markets)}", "ERROR")
+        return False
+
+    return True
 
 def run_daily_predictions(markets_filter=None):
     """
@@ -1341,8 +1572,8 @@ def run_daily_predictions(markets_filter=None):
     
     # Step 1: Update actual prices for past predictions
     log_message("Step 1: Updating actual prices for past predictions...")
-    update_actual_prices(conn)
-    
+    backfill_ok = update_actual_prices(conn)
+
     total_predictions = 0
     total_suppressed = 0
     total_no_direction = 0
@@ -1432,8 +1663,9 @@ def run_daily_predictions(markets_filter=None):
             for days_ahead in PREDICTION_DAYS:
                 log_message(f"    Training {days_ahead}-day model for {pool_label}...")
 
-                # FIX 2+5: train_sector_model returns 6 values (Phase 3 dynamic weights)
-                lgb_model, lr_model, scaler, wf_accuracy, lgb_weight, lr_weight = train_sector_model(sector_df, days_ahead, market)
+                # Phase 6: train_sector_model returns 7 values (adds the isotonic calibrator)
+                (lgb_model, lr_model, scaler, wf_accuracy,
+                 lgb_weight, lr_weight, calibrator) = train_sector_model(sector_df, days_ahead, market)
 
                 if lgb_model is None:
                     log_message(f"    {days_ahead}-day model training failed, skipping", "WARNING")
@@ -1442,32 +1674,84 @@ def run_daily_predictions(markets_filter=None):
                 log_message(f"    [{days_ahead}d] Weights: LGB={lgb_weight:.2f}, LR={lr_weight:.2f} | "
                             f"Predicting for {len(ticker_latest)} tickers...")
 
+                # The band these labels were trained under — stored per row so
+                # the grader scores FLAT against the same threshold.
+                band = (FLAT_THRESHOLD_7D_BY_MARKET.get(market, FLAT_THRESHOLD_7D)
+                        if days_ahead >= 7 else FLAT_THRESHOLD_3D)
+
                 for ticker, ticker_df in ticker_latest.items():
-                    # FIX 3 (revised): SIDEWAYS / INSUFFICIENT regime tickers are no
-                    # longer silently skipped — their predictions are stored with
-                    # is_actionable=0 so every ticker gets a daily row (NASDAQ
-                    # sibling pattern; consumers filter ISNULL(is_actionable,1)=1).
+                    # Every ticker still gets a daily row; the regime is recorded
+                    # as metadata but no longer decides actionability (see below).
                     regime = classify_market_regime(ticker_df)
-                    suppressed = regime in ('SIDEWAYS', 'INSUFFICIENT')
 
                     try:
-                        # Phase 3+4C: unpack 4 values; pass dynamic weights
-                        direction, predicted_change_pct, confidence, predicted_direction = predict_for_ticker_v4(
+                        # Phase 3+4C+6: unpack 5 values; pass dynamic weights + calibrator
+                        (direction, predicted_change_pct, confidence,
+                         predicted_direction, price_suspect) = predict_for_ticker_v4(
                             ticker_df, lgb_model, lr_model, scaler, wf_accuracy, days_ahead,
-                            lgb_weight=lgb_weight, lr_weight=lr_weight
+                            lgb_weight=lgb_weight, lr_weight=lr_weight, calibrator=calibrator
                         )
 
                         if direction is None:
                             total_no_direction += 1
                             continue
 
-                        # Active learning: adjust confidence
+                        # Active learning: adjust confidence.
+                        # Phase 6: disabled by default (USE_ACTIVE_LEARNING=False).
+                        # Its hardcoded 1.15/1.05/0.80 multipliers destroy the
+                        # isotonic calibration this pipeline now depends on.
                         if USE_ACTIVE_LEARNING:
                             perf_hist = all_performance_history.get(ticker, {}).get(days_ahead, {})
                             if perf_hist:
                                 confidence = adjust_confidence_with_history(
                                     confidence, 'Ensemble', perf_hist
                                 )
+
+                        # Phase 6: actionability is now gated on calibrated
+                        # confidence, not on classify_market_regime(). The regime
+                        # gate was measured to have no discriminating power:
+                        # NASDAQ actionable 48.8% vs suppressed 49.0%, NSE 48.8%
+                        # vs 48.1% -- it suppressed ~60% of NSE rows for nothing.
+                        # FLAT is kept out of the signal feed because "expect no
+                        # move" is not a buy/sell instruction -- NOT because it
+                        # is weak. Post-target-fix it is in fact the model's
+                        # strongest class (+16.3pp lift overall, +51.1pp in the
+                        # top confidence quartile, 88.5% accurate there). If a
+                        # volatility or options strategy is ever added, read
+                        # high-confidence FLAT rows from is_actionable=0 /
+                        # suppression_reason='FLAT' rather than discarding them.
+                        # PRICE_ARTIFACT is checked FIRST: a corrupt price series
+                        # invalidates the features the direction call is built
+                        # from, so a confident-looking prediction on such a
+                        # ticker is the most dangerous kind. Previously these
+                        # leaked through as actionable (58 rows since Aug 1,
+                        # including AMIX +518% and BANL +361% surfacing as
+                        # legitimate picks).
+                        # IMMATERIAL: the instrument's own expected move is
+                        # smaller than what this market treats as "no move".
+                        # `band` is the calibrated FLAT threshold — 0.5x the
+                        # median absolute n-day move — so it is already this
+                        # market's definition of materiality. A directional call
+                        # below it is noise dressed as a signal: USDHKD is
+                        # pegged and predicted -0.051% on Sep 2, sixteen times
+                        # under the 0.8% Forex band, yet shipped as actionable.
+                        immaterial = abs(predicted_change_pct) < band * 100
+
+                        if price_suspect:
+                            suppressed, reason = True, 'PRICE_ARTIFACT'
+                        elif predicted_direction == 'FLAT':
+                            suppressed, reason = True, 'FLAT'
+                        elif immaterial:
+                            suppressed, reason = True, 'IMMATERIAL'
+                        elif confidence < ACTIONABLE_CONFIDENCE_MIN:
+                            suppressed, reason = True, 'LOW_CONFIDENCE'
+                        else:
+                            suppressed, reason = False, None
+
+                        # Regime rides along as an audit trail so B3 can measure
+                        # whether it ever had signal -- it no longer gates.
+                        if suppressed and regime in ('SIDEWAYS', 'INSUFFICIENT'):
+                            reason = f"{reason}/{regime}"
 
                         current_price = float(ticker_df['close_price'].iloc[-1])
                         company_name = ticker_company.get(ticker, ticker)
@@ -1478,7 +1762,8 @@ def run_daily_predictions(markets_filter=None):
                             existing_predictions=existing_predictions,
                             predicted_direction=predicted_direction,   # Phase 4C
                             is_actionable=0 if suppressed else 1,
-                            suppression_reason=regime if suppressed else None
+                            suppression_reason=reason,
+                            flat_band_pct=band
                         )
                         if inserted:
                             total_predictions += 1
@@ -1556,16 +1841,36 @@ def run_daily_predictions(markets_filter=None):
     log_message(f"Daily Direction Prediction Job (v4) Completed!")
     log_message(f"  Total Predictions Generated: {total_predictions}")
     log_message(f"    Actionable:                {total_predictions - total_suppressed}")
-    log_message(f"    Suppressed (regime):       {total_suppressed}")
+    log_message(f"    Suppressed (FLAT/low-conf):{total_suppressed}")
     log_message(f"  Skipped (no direction):      {total_no_direction}")
     log_message(f"  Duplicates Skipped:          {total_skipped_dup}")
     log_message(f"  Stocks Skipped (no data):    {total_skipped_data}")
     log_message(f"  Stocks Skipped (unchanged):  {total_skipped_unchanged}")
     log_message(f"  Errors:                      {errors}")
-    log_message(f"  Model: LightGBM + LogReg (per-sector classification + regime filter)")
+    log_message(f"  Model: LightGBM + LogReg (per-sector classification + isotonic confidence)")
     log_message(f"  Features: {len(SELECTED_FEATURES_V4)}")
+    log_message(f"  Outcome backfill:            {'OK' if backfill_ok else 'FAILED'}")
     log_message(f"  Total Time:                  {elapsed:.1f}s ({elapsed/60:.1f} min)")
+
+    # A run that errored on every ticker previously still printed "Completed!"
+    # and exited 0. On 2026-09-03 the Forex job failed all 14 tickers on a
+    # missing column and Task Scheduler recorded LastResult=0 — the market sat
+    # a day stale with nothing flagging it. Per-ticker errors are tolerated
+    # (one bad ticker should not sink the run); a wholesale failure is not.
+    attempted = total_predictions + errors
+    run_ok = True
+    if errors > 0 and total_predictions == 0:
+        log_message(f"RUN FAILED: {errors} errors, 0 predictions stored", "ERROR")
+        run_ok = False
+    elif attempted > 0 and errors > attempted * MAX_ERROR_RATE:
+        log_message(f"RUN DEGRADED: {errors}/{attempted} tickers errored "
+                    f"(>{MAX_ERROR_RATE:.0%} threshold)", "ERROR")
+        run_ok = False
+
+    log_message(f"  Run status:                  {'OK' if run_ok else 'FAILED'}")
     log_message("=" * 80)
+
+    return backfill_ok and run_ok
 
 def load_index_returns(conn, market):
     """
@@ -1712,7 +2017,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     try:
-        run_daily_predictions(markets_filter=args.market)
+        ok = run_daily_predictions(markets_filter=args.market)
+        # Non-zero exit so Task Scheduler surfaces a failed run or a failed
+        # outcome backfill. Both used to report LastResult=0 while doing
+        # nothing — see the 2026-09-03 Forex run (14/14 tickers errored,
+        # 0 predictions, exit 0, market a day stale with no alert).
+        if ok is False:
+            exit(2)
     except Exception as e:
         log_message(f"CRITICAL ERROR: {str(e)}", "ERROR")
         log_message(traceback.format_exc(), "ERROR")

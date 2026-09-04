@@ -10,7 +10,9 @@ Streamlit dashboard + SQL view creator + daily signal tracking/AI predictions fo
 ## Architecture
 - app.py — 11,658-line monolithic Streamlit app (15 pages)
 - create_views.py — Creates 40+ SQL views for ecosystem
-- ai_predictions.py — Daily 6 PM: LR/GB/RF price predictions
+- daily_prediction_job.py — Daily per market: 7-day UP/FLAT/DOWN direction classifier
+  (LightGBM + LogisticRegression, retrained from scratch every run; no pickled artifact).
+  predicted_price is a volatility proxy, NOT a forecast — do not report MAE/RMSE as model error.
 - signal_tracker.py — Daily 7 PM: Signal outcome tracking
 
 ## Critical Views Created

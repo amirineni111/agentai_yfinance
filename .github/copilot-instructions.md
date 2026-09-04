@@ -12,7 +12,7 @@ This is the **visualization and signal tracking** layer of a 7-repo stock tradin
 
 ## Three Responsibilities
 1. **View Creation**: `create_views.py` creates 40+ views (run once/on schema change)
-2. **Scheduled Jobs**: ai_predictions.py (6 PM) + signal_tracker.py (7 PM)
+2. **Scheduled Jobs**: `daily_prediction_job.py --market ...` (7-day UP/FLAT/DOWN direction classifier, LightGBM+LogReg, retrained every run) + signal_tracker.py (7 PM)
 3. **Dashboard**: `streamlit run app.py` → 15-page interactive UI
 
 ## Key SQL Views Created
