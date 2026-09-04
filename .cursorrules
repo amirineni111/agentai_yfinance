@@ -8,12 +8,12 @@ Streamlit dashboard + SQL view creator + daily signal tracking/AI predictions fo
 - SQL Server (localhost\MSSQLSERVER01, stockdata_db)
 
 ## Architecture
-- app.py — 11,658-line monolithic Streamlit app (15 pages)
-- create_views.py — Creates 40+ SQL views for ecosystem
+- streamlitapp_20251123_v2.py — 12,085-line monolithic Streamlit app (15 pages)
+- *.sql (repo root + sql/) — 40+ SQL views for the ecosystem, run manually in SSMS (no create_views.py exists)
 - daily_prediction_job.py — Daily per market: 7-day UP/FLAT/DOWN direction classifier
   (LightGBM + LogisticRegression, retrained from scratch every run; no pickled artifact).
   predicted_price is a volatility proxy, NOT a forecast — do not report MAE/RMSE as model error.
-- signal_tracker.py — Daily 7 PM: Signal outcome tracking
+- daily_signal_tracking_job.py — Daily 7 PM: Signal outcome tracking
 
 ## Critical Views Created
 - vw_PowerBI_AI_Technical_Combos (TIER 1/2 signals — used by agentic AI)
@@ -30,7 +30,7 @@ Streamlit dashboard + SQL view creator + daily signal tracking/AI predictions fo
 - 7:00 PM daily signal tracking
 
 ## Known Issues
-- app.py is monolithic (11,658 lines) — decompose into pages/
+- streamlitapp_20251123_v2.py is monolithic (12,085 lines) — decompose into pages/
 - SQL credentials hardcoded — move to .env
 - No automated tests
 

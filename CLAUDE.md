@@ -35,26 +35,34 @@ Serves a **dual role**:
 Evening    AI direction predictions → ai_prediction_history (LGB+LogReg 'Ensemble', 7-day UP/FLAT/DOWN)
            run_predictions_{nasdaq,nse,forex}.bat → daily_prediction_job.py --market ...
 07:00 PM   Signal tracking          → signal_tracking_history
-On-demand  Dashboard server         → streamlit run app.py
+On-demand  Dashboard server         → streamlit run streamlitapp_20251123_v2.py
 ```
 
 ### Key Files
 
+> **File names below are verified against the working tree (2026-09-04).**
+> `app.py`, `create_views.py`, `signal_tracker.py`, `create_signal_tracking.py`
+> and `setup_scheduler.bat` were documented here for months and **none of them
+> have ever existed**. There is no Python view-deployment layer at all.
+
 ```
 streamlit-trading-dashboard/
-├── app.py                           # MAIN — 11,658-line monolithic Streamlit app
-├── create_views.py                  # Creates 40+ SQL views (run once / on schema change)
-├── create_signal_tracking.py        # Creates signal_tracking_history table
+├── streamlitapp_20251123_v2.py      # MAIN — 12,085-line monolithic Streamlit app
 ├── daily_prediction_job.py          # AI direction pipeline (LGB+LogReg, 7-day UP/FLAT/DOWN)
-├── backfill_actual_prices.py        # Standalone outcome backfill; owns the shared grading SQL
+├── backfill_actual_prices.py        # Strategy 2 outcome backfill; owns the shared grading SQL
+├── backfill_strategy1_outcomes.py   # Strategy 1 outcome backfill (NASDAQ/NSE/Forex ML tables)
+├── daily_signal_tracking_job.py     # Signal tracking job (7 PM)
 ├── run_predictions_{nasdaq,nse,forex}.bat  # Per-market launchers
-├── signal_tracker.py                # Signal tracking job
-├── setup_scheduler.bat              # Task Scheduler setup for daily jobs
+├── run_signal_tracking.bat          # Signal tracking launcher
+├── setup_scheduled_task.ps1         # Task Scheduler setup — AI predictions
+├── setup_signal_tracking_task.ps1   # Task Scheduler setup — signal tracking
+├── sql/                             # Dated, idempotent migrations (run manually in SSMS)
+├── *.sql (repo root)                # View DDL — standalone SSMS scripts, NOT run from Python
 ├── requirements.txt                 # Streamlit + pandas + plotly + pyodbc
 ├── .streamlit/
 │   └── config.toml                  # Streamlit theme configuration
-└── pages/ (or all in app.py)
-    # 15 pages embedded in app.py:
+└── (no pages/ package — all 15 pages live in streamlitapp_20251123_v2.py)
+    # 15 pages embedded in the main app:
     # 1. Dashboard Overview
     # 2. NASDAQ Analysis
     # 3. NSE Analysis
@@ -238,7 +246,7 @@ logs those as `STILL unresolved past target_date` and exits non-zero.
 
 ## 5. SIGNAL TRACKING
 
-### `signal_tracker.py` — Runs daily at 7:00 PM
+### `daily_signal_tracking_job.py` — Runs daily at 7:00 PM
 Tracks outcomes of trading signals at 7-day, 14-day, and 30-day horizons.
 
 ### Output Table: `signal_tracking_history`
@@ -281,16 +289,16 @@ All market data + ML prediction tables from the ecosystem.
 ## 7. KNOWN ISSUES
 
 ### Critical
-- **Monolithic app.py**: 11,658 lines in a single file — needs decomposition into pages/
+- **Monolithic main app**: `streamlitapp_20251123_v2.py` is 12,085 lines in a single file — needs decomposition into pages/
 - **SQL credentials in code**: Connection strings with username/password hardcoded (should use .env)
 - **No tests**: No automated test suite
 
 ### Improvements Needed
-- Break `app.py` into separate page modules (Streamlit multipage app pattern)
+- Break `streamlitapp_20251123_v2.py` into separate page modules (Streamlit multipage app pattern)
 - Move SQL credentials to .env
 - Add caching for expensive SQL queries (`@st.cache_data`)
 - Add error handling for database connection failures
-- Create separate `create_views.sql` script (currently Python-based)
+- Consolidate the root-level view DDL scripts into `sql/` with dated, idempotent migrations
 
 ---
 

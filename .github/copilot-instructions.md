@@ -5,15 +5,15 @@ This is the **visualization and signal tracking** layer of a 7-repo stock tradin
 
 ## Key Architecture Rules
 - Creates **40+ SQL views** consumed by the entire ecosystem (technical indicators, signals, strategies, fundamentals)
-- **app.py** is 11,658 lines (monolithic — needs decomposition into pages/)
+- **streamlitapp_20251123_v2.py** is 12,085 lines (monolithic — needs decomposition into pages/)
 - Daily scheduled jobs: AI predictions (6 PM), signal tracking (7 PM)
 - SQL credentials are **hardcoded** (known issue — should use .env)
 - Connected to `stockdata_db` on `localhost\MSSQLSERVER01`
 
 ## Three Responsibilities
-1. **View Creation**: `create_views.py` creates 40+ views (run once/on schema change)
-2. **Scheduled Jobs**: `daily_prediction_job.py --market ...` (7-day UP/FLAT/DOWN direction classifier, LightGBM+LogReg, retrained every run) + signal_tracker.py (7 PM)
-3. **Dashboard**: `streamlit run app.py` → 15-page interactive UI
+1. **View Creation**: standalone `.sql` scripts in the repo root and `sql/`, run manually in SSMS. There is no `create_views.py` and never has been.
+2. **Scheduled Jobs**: `daily_prediction_job.py --market ...` (7-day UP/FLAT/DOWN direction classifier, LightGBM+LogReg, retrained every run) + daily_signal_tracking_job.py (7 PM)
+3. **Dashboard**: `streamlit run streamlitapp_20251123_v2.py` → 15-page interactive UI
 
 ## Key SQL Views Created
 - `vw_PowerBI_AI_Technical_Combos` — TIER 1/2 trade signals (used by agentic AI)
@@ -23,7 +23,10 @@ This is the **visualization and signal tracking** layer of a 7-repo stock tradin
 - `vw_*_stocks_screen` — Fundamental screening views
 
 ## Tables Written
-- `ai_prediction_history` — LR/GB/RF price predictions
+- `ai_prediction_history` — 7-day UP/FLAT/DOWN **direction** classifications from the
+  LightGBM+LogReg 'Ensemble'. NOT price predictions: LR/GB/RF were retired 2026-02-12,
+  and `predicted_price` is a volatility-scaled magnitude proxy, not a forecast.
+  See CLAUDE.md section 4 — this line was wrong for months and misled a model review.
 - `signal_tracking_history` — Signal outcomes at 7d/14d/30d
 - `daily_signals_history` — Daily signal snapshots
 

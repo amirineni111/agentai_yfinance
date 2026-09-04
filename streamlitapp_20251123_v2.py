@@ -4787,12 +4787,18 @@ def show_prediction_backtesting(market, ticker):
                     st.metric("Direction Accuracy", f"{direction_pct:.1f}%")
                 
                 with cols[2]:
+                    # error_pct is NULL whenever the magnitude proxy could not be
+                    # computed, so it can be all-NaN even when completed is non-empty.
                     avg_error = completed['error_pct'].mean()
-                    st.metric("Avg Error %", f"{avg_error:.2f}%")
+                    st.metric("Avg Error %",
+                              "n/a" if pd.isna(avg_error) else f"{avg_error:.2f}%")
                 
                 with cols[3]:
-                    best_model = completed.groupby('model_name')['error_pct'].mean().idxmin()
-                    st.metric("Best Model", best_model)
+                    # idxmin() raises ValueError on an all-NaN series; len(completed) > 0
+                    # does not rule that out. Guard on the column, not the frame.
+                    model_error = completed.groupby('model_name')['error_pct'].mean().dropna()
+                    st.metric("Best Model",
+                              model_error.idxmin() if not model_error.empty else "n/a")
         else:
             st.info(f"📊 No predictions found for {ticker}. The daily job will generate predictions automatically.")
         
@@ -11770,73 +11776,154 @@ def show_operational_process_page():
         if conn:
             # Strategy 1 accuracy
             st.subheader("Strategy 1 -- Signal Classification Accuracy")
+            st.caption(
+                "Directional calls only (Buy/Sell), against a ~50% base rate. "
+                "The neutral class is excluded from all three markets because it is "
+                "not graded the same way: Forex scored HOLD against a band, while "
+                "NASDAQ and NSE score every Hold Incorrect by construction "
+                "(`ELSE 0` in backfill_strategy1_outcomes.py). Pooling a "
+                "band-graded class with sign-graded calls yields a number that "
+                "cannot be read -- the same reason Strategy 2 below reports "
+                "directional accuracy separately. Forex is restricted to the "
+                "production model; the retired forex_cluster_* experiments scored "
+                "0-50% on 27 rows and would otherwise be pooled in."
+            )
+
+            # Minimum evaluated rows before a percentage is meaningful enough to show.
+            MIN_ACCURACY_SAMPLE = 30
+            # forex_cluster_* and forex_ml_model are dead experiments; see
+            # sql/2026-09-04_forex_hold_band_rescore.sql verification output.
+            FOREX_PRODUCTION_MODEL = "daily_automation_model"
+            DIRECTIONAL_BASE_RATE = 50.0
+
+            def _render_accuracy(label, correct, evaluated):
+                """Show accuracy with n and lift over the coin-flip base rate.
+
+                Suppressed below MIN_ACCURACY_SAMPLE rather than rendering a
+                percentage off a handful of rows.
+                """
+                evaluated = int(evaluated or 0)
+                if evaluated < MIN_ACCURACY_SAMPLE:
+                    st.metric(label, "n/a", f"n={evaluated:,} (need {MIN_ACCURACY_SAMPLE})")
+                    return
+                acc = int(correct or 0) / evaluated * 100
+                st.metric(
+                    label,
+                    f"{acc:.1f}%",
+                    f"{acc - DIRECTIONAL_BASE_RATE:+.1f} pts vs {DIRECTIONAL_BASE_RATE:.0f}% base (n={evaluated:,})",
+                )
+
+            # COALESCE matters: SUM() over zero matching rows returns SQL NULL,
+            # which arrives as None and makes `None > 0` raise TypeError. That was
+            # previously swallowed by a bare `except:` that also hid real SQL errors.
+            _ACCURACY_SELECT = """
+                SELECT
+                    COALESCE(SUM(CASE WHEN direction_correct_1d = 1 THEN 1 ELSE 0 END), 0) AS correct_1d,
+                    COALESCE(SUM(CASE WHEN direction_correct_1d IS NOT NULL THEN 1 ELSE 0 END), 0) AS eval_1d,
+                    COALESCE(SUM(CASE WHEN direction_correct_5d = 1 THEN 1 ELSE 0 END), 0) AS correct_5d,
+                    COALESCE(SUM(CASE WHEN direction_correct_5d IS NOT NULL THEN 1 ELSE 0 END), 0) AS eval_5d
+            """
 
             s1_col1, s1_col2, s1_col3 = st.columns(3)
 
             with s1_col1:
                 try:
-                    # is_actionable filter (June 2026): the table now stores all
-                    # ~2,300 tickers daily; only actionable rows are tradeable
-                    # signals, so accuracy is measured on those (NULL = pre-flag
-                    # rows, which were all actionable).
-                    nasdaq_acc = pd.read_sql("""
-                        SELECT
-                            COUNT(*) as total,
-                            SUM(CASE WHEN direction_correct_1d = 1 THEN 1 ELSE 0 END) as correct_1d,
-                            SUM(CASE WHEN direction_correct_1d IS NOT NULL THEN 1 ELSE 0 END) as eval_1d,
-                            SUM(CASE WHEN direction_correct_5d = 1 THEN 1 ELSE 0 END) as correct_5d,
-                            SUM(CASE WHEN direction_correct_5d IS NOT NULL THEN 1 ELSE 0 END) as eval_5d
-                        FROM ml_trading_predictions
+                    # is_actionable filter (June 2026): the table stores all ~2,300
+                    # tickers daily; only actionable rows are tradeable signals
+                    # (NULL = pre-flag rows, which were all actionable).
+                    nasdaq_acc = pd.read_sql(_ACCURACY_SELECT + """
+                        FROM ml_trading_predictions WITH (NOLOCK)
                         WHERE ISNULL(is_actionable, 1) = 1
+                          AND predicted_signal NOT LIKE '%Hold%'
                     """, conn)
-                    if nasdaq_acc['eval_1d'].iloc[0] > 0:
-                        acc = nasdaq_acc['correct_1d'].iloc[0] / nasdaq_acc['eval_1d'].iloc[0] * 100
-                        st.metric("NASDAQ 1-Day Accuracy", f"{acc:.1f}%", 
-                                  f"{nasdaq_acc['eval_1d'].iloc[0]:,} evaluated")
-                    if nasdaq_acc['eval_5d'].iloc[0] > 0:
-                        acc5 = nasdaq_acc['correct_5d'].iloc[0] / nasdaq_acc['eval_5d'].iloc[0] * 100
-                        st.metric("NASDAQ 5-Day Accuracy", f"{acc5:.1f}%",
-                                  f"{nasdaq_acc['eval_5d'].iloc[0]:,} evaluated")
-                except:
-                    st.info("NASDAQ accuracy data not yet available")
+                    _render_accuracy("NASDAQ 1-Day (directional)",
+                                     nasdaq_acc['correct_1d'].iloc[0], nasdaq_acc['eval_1d'].iloc[0])
+                    _render_accuracy("NASDAQ 5-Day (directional)",
+                                     nasdaq_acc['correct_5d'].iloc[0], nasdaq_acc['eval_5d'].iloc[0])
+                except Exception as e:
+                    st.warning(f"NASDAQ accuracy unavailable: {e}")
 
             with s1_col2:
                 try:
-                    nse_acc = pd.read_sql("""
-                        SELECT prediction_accuracy, COUNT(*) as cnt
+                    # Uses direction_correct_1d/5d rather than the prediction_accuracy
+                    # string, so NSE is measured the same way as the other two markets
+                    # and a 5-day figure is available. NSE has no is_actionable column.
+                    nse_acc = pd.read_sql(_ACCURACY_SELECT + """
                         FROM ml_nse_trading_predictions WITH (NOLOCK)
-                        GROUP BY prediction_accuracy
+                        WHERE predicted_signal NOT LIKE '%Hold%'
                     """, conn)
-                    correct = nse_acc[nse_acc['prediction_accuracy'] == 'Correct']['cnt'].sum()
-                    incorrect = nse_acc[nse_acc['prediction_accuracy'] == 'Incorrect']['cnt'].sum()
-                    total_eval = correct + incorrect
-                    if total_eval > 0:
-                        acc = correct / total_eval * 100
-                        st.metric("NSE 1-Day Accuracy", f"{acc:.1f}%",
-                                  f"{total_eval:,} evaluated")
-                except:
-                    st.info("NSE accuracy data not yet available")
+                    _render_accuracy("NSE 1-Day (directional)",
+                                     nse_acc['correct_1d'].iloc[0], nse_acc['eval_1d'].iloc[0])
+                    _render_accuracy("NSE 5-Day (directional)",
+                                     nse_acc['correct_5d'].iloc[0], nse_acc['eval_5d'].iloc[0])
+                except Exception as e:
+                    st.warning(f"NSE accuracy unavailable: {e}")
 
             with s1_col3:
                 try:
-                    forex_acc = pd.read_sql("""
-                        SELECT 
-                            SUM(CASE WHEN direction_correct_1d = 1 THEN 1 ELSE 0 END) as correct_1d,
-                            SUM(CASE WHEN direction_correct_1d IS NOT NULL THEN 1 ELSE 0 END) as eval_1d,
-                            SUM(CASE WHEN direction_correct_5d = 1 THEN 1 ELSE 0 END) as correct_5d,
-                            SUM(CASE WHEN direction_correct_5d IS NOT NULL THEN 1 ELSE 0 END) as eval_5d
-                        FROM forex_ml_predictions
-                    """, conn)
-                    if forex_acc['eval_1d'].iloc[0] > 0:
-                        acc = forex_acc['correct_1d'].iloc[0] / forex_acc['eval_1d'].iloc[0] * 100
-                        st.metric("Forex 1-Day Accuracy", f"{acc:.1f}%",
-                                  f"{forex_acc['eval_1d'].iloc[0]:,} evaluated")
-                    if forex_acc['eval_5d'].iloc[0] > 0:
-                        acc5 = forex_acc['correct_5d'].iloc[0] / forex_acc['eval_5d'].iloc[0] * 100
-                        st.metric("Forex 5-Day Accuracy", f"{acc5:.1f}%",
-                                  f"{forex_acc['eval_5d'].iloc[0]:,} evaluated")
-                except:
-                    st.info("Forex accuracy data not yet available")
+                    forex_acc = pd.read_sql(_ACCURACY_SELECT + """
+                        FROM forex_ml_predictions WITH (NOLOCK)
+                        WHERE model_name = ?
+                          AND predicted_signal <> 'HOLD'
+                    """, conn, params=[FOREX_PRODUCTION_MODEL])
+                    _render_accuracy("Forex 1-Day (directional)",
+                                     forex_acc['correct_1d'].iloc[0], forex_acc['eval_1d'].iloc[0])
+                    _render_accuracy("Forex 5-Day (directional)",
+                                     forex_acc['correct_5d'].iloc[0], forex_acc['eval_5d'].iloc[0])
+                except Exception as e:
+                    st.warning(f"Forex accuracy unavailable: {e}")
+
+            st.markdown("---")
+
+            # ---- CONFIDENCE CALIBRATION (NASDAQ Strategy 1) ----
+            # Written by monitor_calibration.py in sqlserver_copilot. Answers the
+            # one question a confidence score has to answer: does a higher number
+            # actually mean a higher win rate? If is_monotonic is False for a
+            # signal, ranking or gating on confidence for that side is not
+            # supported by outcomes -- which is exactly what the Sell book showed.
+            st.subheader("Confidence Calibration -- does confidence predict win rate?")
+            try:
+                calib = pd.read_sql("""
+                    SELECT predicted_signal, confidence_bucket, bucket_low,
+                           n_predictions, n_correct, win_rate, avg_confidence,
+                           is_monotonic, model_version, snapshot_date, window_days
+                    FROM ml_calibration_monitor WITH (NOLOCK)
+                    WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM ml_calibration_monitor WITH (NOLOCK))
+                    ORDER BY predicted_signal, bucket_low
+                """, conn)
+
+                if calib.empty:
+                    st.info("No calibration snapshot yet. Run monitor_calibration.py in sqlserver_copilot.")
+                else:
+                    snap = calib.iloc[0]
+                    st.caption(
+                        f"Snapshot {snap['snapshot_date']} - model_version `{snap['model_version']}` "
+                        f"- {int(snap['window_days'])}-day window"
+                    )
+                    verdict_cols = st.columns(calib['predicted_signal'].nunique())
+                    for col, (sig, grp) in zip(verdict_cols, calib.groupby('predicted_signal')):
+                        with col:
+                            monotonic = bool(grp['is_monotonic'].iloc[0])
+                            st.metric(
+                                f"{sig} calibration",
+                                "monotonic" if monotonic else "NOT monotonic",
+                                f"{grp['win_rate'].min() * 100:.1f}% -> {grp['win_rate'].max() * 100:.1f}% across buckets",
+                                delta_color="normal" if monotonic else "inverse",
+                            )
+                            if not monotonic:
+                                st.caption(
+                                    f":warning: Confidence does not rank {sig} outcomes. "
+                                    "Do not gate or sort this side on confidence."
+                                )
+
+                    display = calib[['predicted_signal', 'confidence_bucket', 'n_predictions',
+                                     'n_correct', 'win_rate', 'avg_confidence']].copy()
+                    display['win_rate'] = (display['win_rate'] * 100).round(1)
+                    display['avg_confidence'] = (display['avg_confidence'] * 100).round(1)
+                    display.columns = ['Signal', 'Bucket', 'N', 'Correct', 'Win %', 'Avg conf %']
+                    st.dataframe(display, use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.warning(f"Calibration monitor unavailable: {e}")
 
             st.markdown("---")
 

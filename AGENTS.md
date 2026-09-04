@@ -8,16 +8,17 @@ This repo does NOT contain CrewAI agents. It is a **Streamlit dashboard** with 1
 ```
 [SQL Server: stockdata_db]
         │
-        ├─ create_views.py → Creates 40+ SQL views
+        ├─ *.sql (repo root + sql/) → 40+ SQL views, run manually in SSMS
         │   (Technical indicators, signals, strategies, fundamentals)
+        │   NOTE: there is no create_views.py and never has been.
         │
         ├─ daily_prediction_job.py → Daily, one run per market
         │   (LightGBM+LogReg 'Ensemble', 7-day UP/FLAT/DOWN → ai_prediction_history)
         │
-        ├─ signal_tracker.py → Daily 7 PM
+        ├─ daily_signal_tracking_job.py → Daily 7 PM
         │   (Signal outcome tracking → signal_tracking_history)
         │
-        └─ app.py → Streamlit dashboard (11,658 lines)
+        └─ streamlitapp_20251123_v2.py → Streamlit dashboard (12,085 lines)
             (15 pages: Overview, NASDAQ, NSE, Forex, AI Predictions,
              ML Signals, Tech Indicators, Signal Tracker, Strategy Combos,
              Cross-Strategy, Fundamentals, Portfolio, Trade Journal, Risk, Admin)
@@ -39,4 +40,4 @@ When views in this repo change, it affects:
 - `sqlserver_mcp` — MCP server exposes these views
 
 ## Known Issue
-`app.py` is 11,658 lines — monolithic. Needs decomposition into Streamlit multipage pattern.
+`streamlitapp_20251123_v2.py` is 12,085 lines — monolithic. Needs decomposition into Streamlit multipage pattern.

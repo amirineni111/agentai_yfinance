@@ -25,6 +25,26 @@ import sys
 # Force unbuffered output so logs appear immediately
 sys.stdout.reconfigure(line_buffering=True)
 
+# =====================================================
+# FOREX HOLD band (2026-09-04)
+#
+# A HOLD is scored Correct when |actual move| stays inside this band.
+# This was hardcoded as 0.01 (1.0%) at three sites, which is enormous for a
+# 1-day FX move -- wider even than the 0.0080 band that calibrate_flat_threshold()
+# derives for Forex over a *7-day* horizon (sql/2026-09-03_add_flat_band.sql:60).
+# Measured effect of the old band on live rows: HOLD graded 93.4% correct
+# (394/422), dragging the blended Forex headline to 63.1% when the same rows
+# excluding HOLD score 50.9%.
+#
+# NASDAQ and NSE have no HOLD branch at all -- they score every HOLD Incorrect
+# via ELSE 0 -- so Forex was the only market crediting it.
+#
+# Changing this constant does NOT regrade existing rows: every backfill pass is
+# gated on actual_return_Nd IS NULL. Pair any change with an in-place rescore
+# migration, as sql/2026-09-04_forex_hold_band_rescore.sql does for this one.
+# =====================================================
+FOREX_HOLD_BAND = 0.0025  # 0.25%
+
 # Database connection
 def get_db_connection():
     """Get SQL Server database connection"""
@@ -98,7 +118,10 @@ def nullify_anomalous_returns(conn):
     conn.commit()
     log_message(f"Total nullified: {total_nullified} records across all markets")
     if total_nullified > 0:
-        log_message("Re-backfill will now apply the +-25% guard on all writes.")
+        # 5d/10d are deliberately NOT guarded: a 25% move over 5-10 sessions is
+        # legitimate for equities, so the 1-day circuit-breaker threshold does
+        # not transfer. Only the 1-day write is validated.
+        log_message("Re-backfill will now apply the +-25% guard on 1-day writes")
 
 
 # =====================================================
@@ -116,10 +139,13 @@ def backfill_nasdaq_predictions(conn):
     
     cursor = conn.cursor()
     
-    # Count pending
+    # Count pending across ALL horizons. Counting only actual_return_1d made
+    # the early return below skip the 5d/10d passes whenever the 1d backlog was
+    # empty -- which is the steady state, since 1d resolves first.
     cursor.execute("""
         SELECT COUNT(*) FROM ml_trading_predictions 
-        WHERE actual_return_1d IS NULL AND trading_date <= DATEADD(day, -1, GETDATE())
+        WHERE (actual_return_1d IS NULL OR actual_return_5d IS NULL OR actual_return_10d IS NULL)
+          AND trading_date <= DATEADD(day, -1, GETDATE())
     """)
     pending = cursor.fetchone()[0]
     log_message(f"Found {pending} NASDAQ predictions to backfill")
@@ -139,11 +165,15 @@ def backfill_nasdaq_predictions(conn):
                 ELSE ((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100
             END,
             p.direction_correct_1d = CASE 
+                WHEN NULLIF(p.close_price, 0) IS NULL THEN NULL
+                WHEN ABS(((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100) > 25 THEN NULL
                 WHEN p.predicted_signal LIKE '%Buy%' AND CAST(h.close_price AS FLOAT) > p.close_price THEN 1
                 WHEN p.predicted_signal LIKE '%Sell%' AND CAST(h.close_price AS FLOAT) < p.close_price THEN 1
                 ELSE 0
             END,
             p.prediction_accuracy = CASE 
+                WHEN NULLIF(p.close_price, 0) IS NULL THEN NULL
+                WHEN ABS(((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100) > 25 THEN NULL
                 WHEN p.predicted_signal LIKE '%Buy%' AND CAST(h.close_price AS FLOAT) > p.close_price THEN 'Correct'
                 WHEN p.predicted_signal LIKE '%Sell%' AND CAST(h.close_price AS FLOAT) < p.close_price THEN 'Correct'
                 ELSE 'Incorrect'
@@ -228,7 +258,8 @@ def backfill_nse_predictions(conn):
     # Count pending
     cursor.execute("""
         SELECT COUNT(*) FROM ml_nse_trading_predictions 
-        WHERE actual_return_1d IS NULL AND trading_date <= DATEADD(day, -1, GETDATE())
+        WHERE (actual_return_1d IS NULL OR actual_return_5d IS NULL OR actual_return_10d IS NULL)
+          AND trading_date <= DATEADD(day, -1, GETDATE())
     """)
     pending = cursor.fetchone()[0]
     log_message(f"Found {pending} NSE predictions to backfill")
@@ -248,11 +279,15 @@ def backfill_nse_predictions(conn):
                 ELSE ((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100
             END,
             p.direction_correct_1d = CASE 
+                WHEN NULLIF(p.close_price, 0) IS NULL THEN NULL
+                WHEN ABS(((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100) > 25 THEN NULL
                 WHEN p.predicted_signal = 'Buy' AND CAST(h.close_price AS FLOAT) > p.close_price THEN 1
                 WHEN p.predicted_signal = 'Sell' AND CAST(h.close_price AS FLOAT) < p.close_price THEN 1
                 ELSE 0
             END,
             p.prediction_accuracy = CASE 
+                WHEN NULLIF(p.close_price, 0) IS NULL THEN NULL
+                WHEN ABS(((CAST(h.close_price AS FLOAT) - p.close_price) / p.close_price) * 100) > 25 THEN NULL
                 WHEN p.predicted_signal = 'Buy' AND CAST(h.close_price AS FLOAT) > p.close_price THEN 'Correct'
                 WHEN p.predicted_signal = 'Sell' AND CAST(h.close_price AS FLOAT) < p.close_price THEN 'Correct'
                 ELSE 'Incorrect'
@@ -337,7 +372,7 @@ def backfill_forex_predictions(conn):
     # Count pending
     cursor.execute("""
         SELECT COUNT(*) FROM forex_ml_predictions 
-        WHERE actual_return_1d IS NULL 
+        WHERE (actual_return_1d IS NULL OR actual_return_5d IS NULL OR actual_return_10d IS NULL)
           AND CAST(prediction_date AS date) <= DATEADD(day, -1, GETDATE())
           AND close_price IS NOT NULL AND close_price > 0
     """)
@@ -349,7 +384,7 @@ def backfill_forex_predictions(conn):
     
     # ---- 1-DAY RETURN ----
     log_message("  Updating 1-day returns...")
-    cursor.execute("""
+    cursor.execute(f"""
         UPDATE p
         SET 
             -- Guard: reject |return| > 25% (Forex pip moves rarely exceed 5-8%/day)
@@ -359,15 +394,19 @@ def backfill_forex_predictions(conn):
                 ELSE ((CAST(h.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT)) * 100
             END,
             p.direction_correct_1d = CASE 
+                WHEN NULLIF(CAST(p.close_price AS FLOAT), 0) IS NULL THEN NULL
+                WHEN ABS(((CAST(h.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT)) * 100) > 25 THEN NULL
                 WHEN p.predicted_signal = 'BUY' AND CAST(h.close_price AS FLOAT) > CAST(p.close_price AS FLOAT) THEN 1
                 WHEN p.predicted_signal = 'SELL' AND CAST(h.close_price AS FLOAT) < CAST(p.close_price AS FLOAT) THEN 1
-                WHEN p.predicted_signal = 'HOLD' AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT) < 0.01 THEN 1
+                WHEN p.predicted_signal = 'HOLD' AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT) < {FOREX_HOLD_BAND} THEN 1
                 ELSE 0
             END,
             p.prediction_accuracy = CASE 
+                WHEN NULLIF(CAST(p.close_price AS FLOAT), 0) IS NULL THEN NULL
+                WHEN ABS(((CAST(h.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT)) * 100) > 25 THEN NULL
                 WHEN p.predicted_signal = 'BUY' AND CAST(h.close_price AS FLOAT) > CAST(p.close_price AS FLOAT) THEN 'Correct'
                 WHEN p.predicted_signal = 'SELL' AND CAST(h.close_price AS FLOAT) < CAST(p.close_price AS FLOAT) THEN 'Correct'
-                WHEN p.predicted_signal = 'HOLD' AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT) < 0.01 THEN 'Correct'
+                WHEN p.predicted_signal = 'HOLD' AND ABS(CAST(h.close_price AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT) < {FOREX_HOLD_BAND} THEN 'Correct'
                 ELSE 'Incorrect'
             END,
             p.updated_at = GETDATE()
@@ -387,14 +426,14 @@ def backfill_forex_predictions(conn):
     
     # ---- 5-DAY RETURN ----
     log_message("  Updating 5-day returns...")
-    cursor.execute("""
+    cursor.execute(f"""
         UPDATE p
         SET 
             p.actual_return_5d = ((CAST(future.close_price_5d AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT)) * 100,
             p.direction_correct_5d = CASE 
                 WHEN p.predicted_signal = 'BUY' AND CAST(future.close_price_5d AS FLOAT) > CAST(p.close_price AS FLOAT) THEN 1
                 WHEN p.predicted_signal = 'SELL' AND CAST(future.close_price_5d AS FLOAT) < CAST(p.close_price AS FLOAT) THEN 1
-                WHEN p.predicted_signal = 'HOLD' AND ABS(CAST(future.close_price_5d AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT) < 0.01 THEN 1
+                WHEN p.predicted_signal = 'HOLD' AND ABS(CAST(future.close_price_5d AS FLOAT) - CAST(p.close_price AS FLOAT)) / CAST(p.close_price AS FLOAT) < {FOREX_HOLD_BAND} THEN 1
                 ELSE 0
             END,
             p.updated_at = GETDATE()
