@@ -642,6 +642,53 @@ def calculate_technical_indicators_v4(df, rsi_df=None, market_index_returns=None
 
     return df.dropna()
 
+# Phase 7 (2026-09-26): P(correct) calibrated PER PREDICTED CLASS.
+#
+# Phase 6 fitted one isotonic map over all out-of-fold rows pooled. That is
+# wrong whenever the classes have different precision, and they badly do:
+# measured on graded history since 2026-05-25, NSE UP/DOWN carry 1.53x/1.59x
+# lift over their base rates while FLAT carries only 1.06x. NSE predicts FLAT
+# ~85% of the time, so the pooled map is dominated by the one class with no
+# edge -- it collapsed every NSE confidence into [31.9, 35.7], entirely below
+# ACTIONABLE_CONFIDENCE_MIN=45, and NSE emitted zero actionable predictions for
+# 14 consecutive trading days while its UP/DOWN calls were its best on record
+# (Sept 2026: lowest avg confidence 42.6, HIGHEST realized accuracy 55.8%).
+#
+# Fitting one map per predicted class scores an UP call against how often UP
+# calls come true, not against the FLAT-dominated pooled rate.
+#
+# This must be validated against realized direction_correct, not walk-forward
+# accuracy -- the pooled gate looked fine on WF numbers and had zero realized
+# selectivity (actionable 49.4% vs suppressed 49.4% on NASDAQ).
+class PerClassCalibrator:
+    """Isotonic winning-probability -> P(correct) maps, one per predicted class.
+
+    Falls back to the pooled map for any class with too few out-of-fold rows
+    or only one outcome present, so a thin class degrades to Phase 6 behavior
+    rather than to an unfitted constant.
+    """
+
+    MIN_PER_CLASS = 50
+
+    def __init__(self, pooled=None, per_class=None):
+        self.pooled = pooled
+        self.per_class = per_class or {}
+
+    def predict_for_class(self, prob, cls):
+        """Calibrated P(correct) for one prediction, or None if nothing fitted."""
+        cal = self.per_class.get(int(cls)) or self.pooled
+        if cal is None:
+            return None
+        return float(cal.predict([prob])[0])
+
+    def predict(self, X):
+        """Pooled path -- keeps log_reliability and any legacy caller working."""
+        return self.pooled.predict(X)
+
+    def __bool__(self):
+        return self.pooled is not None or bool(self.per_class)
+
+
 def train_sector_model(sector_df, days_ahead, market=None):
     """
     FIX 2 + FIX 5: Train a classification model on ONE sector's pooled data.
@@ -839,13 +886,36 @@ def train_sector_model(sector_df, days_ahead, market=None):
         # choice here: monotone but free-form, so it can express "this model's
         # 0.45 means 52% correct" without assuming a parametric shape.
         # Needs both outcomes present, or the fit is a constant.
+        pooled_cal = None
         if len(was_correct) >= 50 and 0 < was_correct.sum() < len(was_correct):
             try:
-                calibrator = IsotonicRegression(
+                pooled_cal = IsotonicRegression(
                     y_min=0.02, y_max=0.98, out_of_bounds='clip'
                 ).fit(win_proba, was_correct)
             except Exception as e:
                 log_message(f"    Calibrator fit failed: {e} — falling back to WF accuracy", "WARNING")
+
+        # Phase 7: one isotonic map per predicted class. A class with too few
+        # out-of-fold rows, or with only one outcome present (isotonic would fit
+        # a constant), is left out and falls back to the pooled map.
+        per_class = {}
+        for cls_idx in (0, 1, 2):
+            m = (pred_class == cls_idx)
+            n_cls = int(m.sum())
+            if n_cls < PerClassCalibrator.MIN_PER_CLASS:
+                continue
+            yc = was_correct[m]
+            if not (0 < yc.sum() < len(yc)):
+                continue
+            try:
+                per_class[cls_idx] = IsotonicRegression(
+                    y_min=0.02, y_max=0.98, out_of_bounds='clip'
+                ).fit(win_proba[m], yc)
+            except Exception as e:
+                log_message(f"    Per-class calibrator fit failed for class {cls_idx}: {e}", "WARNING")
+
+        if pooled_cal is not None or per_class:
+            calibrator = PerClassCalibrator(pooled=pooled_cal, per_class=per_class)
     else:
         wf_accuracy = float(np.mean(lgb_wf_scores + lr_wf_scores) * 100) if (lgb_wf_scores or lr_wf_scores) else 50.0
 
@@ -884,12 +954,14 @@ def train_sector_model(sector_df, days_ahead, market=None):
                 f"Calibrator: {'fitted' if calibrator is not None else 'NONE (fallback)'}")
 
     if calibrator is not None:
-        log_reliability(calibrator, win_proba, was_correct, days_ahead)
+        log_reliability(calibrator, win_proba, was_correct, days_ahead,
+                        pred_class=pred_class)
 
     return lgb_model, lr_model, scaler, wf_accuracy, lgb_weight, lr_weight, calibrator
 
 
-def log_reliability(calibrator, win_proba, was_correct, days_ahead, n_bins=5):
+def log_reliability(calibrator, win_proba, was_correct, days_ahead, n_bins=5,
+                    pred_class=None):
     """
     Log the calibrator's reliability on the out-of-fold data it was fitted to:
     predicted P(correct) vs realized, in equal-count bins.
@@ -899,19 +971,43 @@ def log_reliability(calibrator, win_proba, was_correct, days_ahead, n_bins=5):
     accuracy tracking predicted confidence across bins. A flat line means the
     features carry no confidence signal and no amount of rescaling will help.
     """
-    try:
-        conf = calibrator.predict(win_proba)
+    def _bins(conf, correct, n_bins):
         order = np.argsort(conf)
-        parts = np.array_split(order, n_bins)
         cells = []
-        for part in parts:
+        for part in np.array_split(order, n_bins):
             if len(part) == 0:
                 continue
-            cells.append(f"{conf[part].mean()*100:.0f}%->{was_correct[part].mean()*100:.0f}%")
+            cells.append(f"{conf[part].mean()*100:.0f}%->{correct[part].mean()*100:.0f}%")
+        return cells
+
+    try:
+        conf = calibrator.predict(win_proba)
         log_message(f"    [{days_ahead}d] Reliability (pred->actual, n={len(win_proba):,}): "
-                    + "  ".join(cells))
+                    + "  ".join(_bins(conf, was_correct, n_bins)))
     except Exception as e:
         log_message(f"    Reliability check failed: {e}", "WARNING")
+
+    # Phase 7: the per-class view is the one that matters -- a pooled line can
+    # look healthy while the class the gate actually fires on is flat. Also
+    # prints each class's realized precision, which is what the gate is
+    # ultimately trying to estimate.
+    if pred_class is None or not getattr(calibrator, 'per_class', None):
+        return
+    labels = {0: 'DOWN', 1: 'FLAT', 2: 'UP'}
+    for cls_idx in (0, 1, 2):
+        cal = calibrator.per_class.get(cls_idx)
+        if cal is None:
+            continue
+        m = (pred_class == cls_idx)
+        if not m.any():
+            continue
+        try:
+            c = cal.predict(win_proba[m])
+            log_message(f"      [{days_ahead}d] {labels[cls_idx]:<4} n={int(m.sum()):>6} "
+                        f"precision={was_correct[m].mean()*100:.1f}%  "
+                        f"calib: " + "  ".join(_bins(c, was_correct[m], 3)))
+        except Exception as e:
+            log_message(f"      Per-class reliability failed for {labels[cls_idx]}: {e}", "WARNING")
 
 
 def predict_for_ticker_v4(ticker_df, lgb_model, lr_model, scaler, wf_accuracy, days_ahead,
@@ -1011,7 +1107,10 @@ def predict_for_ticker_v4(ticker_df, lgb_model, lr_model, scaler, wf_accuracy, d
     # predictions from this same sector model, so it is specific to this
     # sector, market, and horizon.
     if calibrator is not None:
-        confidence = float(calibrator.predict([direction_prob])[0]) * 100.0
+        # Phase 7: score against this predicted class's own map, not the pooled
+        # one. predict_for_class falls back to pooled for thin classes.
+        _cal = calibrator.predict_for_class(direction_prob, predicted_class)
+        confidence = float(_cal) * 100.0 if _cal is not None else float(wf_accuracy)
     else:
         # No calibrator (too few out-of-fold rows, or the fit failed): fall back
         # to the sector's blended walk-forward accuracy. Honest and uninformative
