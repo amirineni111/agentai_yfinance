@@ -1063,53 +1063,113 @@ def build_sector_groups(ticker_list, market):
     return groups
 
 
+# nse_500.sector uses Yahoo-style names; dbo.nse_sector_sentiment uses its own
+# India-specific names. Unlike NASDAQ (where nasdaq_top100.sector and
+# nasdaq_sector_sentiment share the 11 GICS names, so the map is an identity),
+# NSE needs an explicit translation. Genuinely ambiguous sectors map to None —
+# 'Basic Materials' spans both 'Chemicals' and 'Metals & Mining' in the
+# sentiment table, and guessing would feed 347 tickers a wrong sector signal.
+# None is the already-exercised safe path (INFRA/OTHER_NSE used it before).
+NSE_DB_SECTOR_TO_SENTIMENT = {
+    'Technology':             'Information Technology',
+    'Financial Services':     'Financial Services',
+    'Healthcare':             'Healthcare',
+    'Real Estate':            'Real Estate',
+    'Energy':                 'Energy',
+    'Industrials':            'Infrastructure & Industrials',
+    'Consumer Defensive':     'Fast Moving Consumer Goods',
+    'Consumer Cyclical':      'Consumer Goods',
+    'Communication Services': 'Telecom',
+    'Basic Materials':        None,   # ambiguous: Chemicals vs Metals & Mining
+    'Utilities':              None,   # no counterpart in nse_sector_sentiment
+}
+
+# Per-market wiring for the DB-driven sector map.
+#   table          — source of the ticker -> sector mapping
+#   global_name    — module global holding that market's sector map
+#   catch_all      — bucket for NULL-sector / unlisted tickers
+#   sentiment_map  — None means the DB sector names ARE the sentiment names
+#                    (identity, NASDAQ); a dict means translate (NSE).
+SECTOR_MAP_SOURCES = {
+    'NASDAQ 100': {
+        'table':         'dbo.nasdaq_top100',
+        'global_name':   'SECTOR_MAP_NASDAQ',
+        'catch_all':     'OTHER_NASDAQ',
+        'sentiment_map': None,
+    },
+    'NSE 500': {
+        'table':         'dbo.nse_500',
+        'global_name':   'SECTOR_MAP_NSE',
+        'catch_all':     'OTHER_NSE',
+        'sentiment_map': NSE_DB_SECTOR_TO_SENTIMENT,
+    },
+}
+
+
 def refresh_sector_map_from_db(conn, market):
     """
-    Phase 5 (primary NASDAQ fix): replace the hardcoded SECTOR_MAP_NASDAQ with a
-    data-driven ticker -> GICS sector map read from dbo.nasdaq_top100.
+    Replace a market's hardcoded sector map with a data-driven ticker -> sector
+    map read from its reference table (dbo.nasdaq_top100 / dbo.nse_500).
 
-    Why: the NASDAQ universe (nasdaq_100_hist_data) is ~2,368 tickers, but the
-    hardcoded map named only ~49 of them, so ~2,300 tickers were dumped into the
-    single OTHER_NASDAQ catch-all and trained as one model across unrelated
-    industries. That noise is why NASDAQ predictions stopped agreeing with the
-    sibling ml_trading_predictions model while NSE (well-sectored) kept agreeing.
+    Phase 5 introduced this for NASDAQ: the universe is ~2,368 tickers but the
+    hardcoded map named only ~49, so ~2,300 tickers were dumped into the single
+    OTHER_NASDAQ catch-all and trained as one model across unrelated industries.
 
-    nasdaq_top100.sector uses the SAME 11 GICS names as nasdaq_sector_sentiment,
-    so the sentiment map becomes an identity mapping (no translation table needed).
+    2026-09-26: NSE had the same defect, worse. SECTOR_MAP_NSE names 89 tickers
+    as BARE symbols ('TCS', 'RELIANCE') while every ticker in nse_500_hist_data
+    carries a .NS/.BO suffix ('TCS.NS'). get_sector_for_ticker does an exact
+    `in` test, so the map matched ZERO of 2,079 tickers — all of them landed in
+    OTHER_NSE and trained as one model spanning 11 industries. That model scored
+    35.3% walk-forward on a 3-class problem (~33.3% is random), so the isotonic
+    calibrator honestly collapsed every confidence into [31.9, 35.7] — entirely
+    below ACTIONABLE_CONFIDENCE_MIN=45. Result: NSE produced 0 actionable
+    predictions for 14 consecutive trading days. The gate was not broken; it
+    was correctly refusing to trade a model with no skill.
 
-    Mutates the module globals SECTOR_MAP_NASDAQ and SENTIMENT_SECTOR_MAP['NASDAQ 100'].
-    Only acts for 'NASDAQ 100'; NSE/Forex keep their existing hardcoded maps so their
-    (already-good) behavior and sentiment wiring are untouched.
+    Mutates the market's sector-map global and its SENTIMENT_SECTOR_MAP entry.
     Falls back silently to the hardcoded map on any error.
     """
-    if market != 'NASDAQ 100':
+    cfg = SECTOR_MAP_SOURCES.get(market)
+    if cfg is None:          # Forex has no sector dimension
         return
 
-    global SECTOR_MAP_NASDAQ
     try:
         df = pd.read_sql(
-            "SELECT ticker, sector FROM dbo.nasdaq_top100 WHERE sector IS NOT NULL",
+            f"SELECT ticker, sector FROM {cfg['table']} WHERE sector IS NOT NULL",
             conn,
         )
         if df.empty:
-            log_message("  Sector map: nasdaq_top100 returned no rows — keeping hardcoded map", "WARNING")
+            log_message(f"  Sector map: {cfg['table']} returned no rows — keeping hardcoded map", "WARNING")
             return
 
+        catch_all = cfg['catch_all']
         new_map = {}
         for sector, grp in df.groupby('sector'):
             new_map[sector] = sorted(grp['ticker'].dropna().unique().tolist())
-        new_map['OTHER_NASDAQ'] = []   # catch-all for NULL-sector / unlisted tickers
+        new_map[catch_all] = []   # catch-all for NULL-sector / unlisted tickers
 
-        SECTOR_MAP_NASDAQ.clear()
-        SECTOR_MAP_NASDAQ.update(new_map)
+        target = globals()[cfg['global_name']]
+        target.clear()
+        target.update(new_map)
 
-        # GICS sector names match the sentiment table names exactly -> identity map.
-        SENTIMENT_SECTOR_MAP['NASDAQ 100'] = {s: (None if s == 'OTHER_NASDAQ' else s)
-                                              for s in new_map.keys()}
+        # Rewire sentiment lookup to the new sector keys. Identity for NASDAQ
+        # (GICS names match the sentiment table); explicit translation for NSE.
+        translate = cfg['sentiment_map']
+        if translate is None:
+            SENTIMENT_SECTOR_MAP[market] = {s: (None if s == catch_all else s)
+                                            for s in new_map.keys()}
+        else:
+            SENTIMENT_SECTOR_MAP[market] = {s: (None if s == catch_all else translate.get(s))
+                                            for s in new_map.keys()}
+            unmapped = sorted(s for s in new_map
+                              if s != catch_all and translate.get(s) is None)
+            if unmapped:
+                log_message(f"  Sector map: no sentiment counterpart for {', '.join(unmapped)} "
+                            f"— those tickers train without sentiment features")
 
-        named = sum(len(v) for k, v in new_map.items() if k != 'OTHER_NASDAQ')
-        log_message(f"  Sector map (DB): {len(new_map)-1} GICS sectors covering {named} NASDAQ tickers "
-                    f"(was ~49 hardcoded; catch-all now only NULL-sector names)")
+        named = sum(len(v) for k, v in new_map.items() if k != catch_all)
+        log_message(f"  Sector map (DB): {len(new_map)-1} sectors covering {named} {market} tickers "
+                    f"from {cfg['table']} (catch-all now only NULL-sector names)")
     except Exception as e:
         log_message(f"  Sector map: DB load failed ({e}) — keeping hardcoded map", "WARNING")
 
